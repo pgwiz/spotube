@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes
+- **server/StreamProxy**: Prevent GoogleVideo CDN HTTP 403 Forbidden by injecting `Referer: https://www.youtube.com/` and browser `User-Agent` headers on `googlevideo.com` and `youtube.com` proxy requests, preserving stream range headers (`Range`, `If-Range`) and filtering hop-by-hop headers.
+- **newpipe/RealNewPipeAudioAPI**: Fix YouTube video ID extraction when `track.externalUri` contains YouTube URLs (`v=`, `youtu.be`, `/embed/`, `/shorts/`) instead of passing raw Spotify track IDs to video info lookups.
+- **newpipe/RealNewPipeAudioAPI**: Improve track matching and scoring for Topic channels, VEVO uploads, and official variants with relaxed duration bins, and fall back to top relevance search result when confidence scoring yields no candidates $\ge 0.3$.
+- **newpipe/NewPipeService**: Implement native YouTube radio mix extractor (`RD{videoId}`) across commonMain, androidJvmMain, and iosMain platforms.
+- **audioplayer/DeviceAudioPlayerQueue**: Add native YouTube radio mix fallback for endless playback queue continuation when metadata recommendations fail or are unauthenticated.
+
 ## [6.0.0-beta.0](https://github.com/team-spotube/spotube/compare/v5.1.2...v6.0.0-beta.0) (2026-10-26)
 
 ### Features

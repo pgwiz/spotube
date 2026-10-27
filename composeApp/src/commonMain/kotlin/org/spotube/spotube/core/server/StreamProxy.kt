@@ -34,6 +34,7 @@ import io.ktor.http.HeadersBuilder
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.Url
 import io.ktor.http.content.OutgoingContent
 import io.ktor.http.decodeURLQueryComponent
 import io.ktor.http.encodeURLParameter
@@ -72,6 +73,9 @@ internal class StreamProxy(
 
     companion object {
         private const val HOST = "127.0.0.1"
+        private const val YOUTUBE_REFERER = "https://www.youtube.com/"
+        private const val BROWSER_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
     private val fileSystem = FileSystem.SYSTEM
@@ -233,8 +237,7 @@ internal class StreamProxy(
         val response = runCatching {
             httpClient.request(manifestUrl) {
                 method = HttpMethod.Get
-                call.forwardRequestHeaderIfPresent(headers, HttpHeaders.Accept)
-                call.forwardRequestHeaderIfPresent(headers, HttpHeaders.UserAgent)
+                applyUpstreamHeaders(call, this, manifestUrl, includeRange = false)
             }
         }.getOrElse { throwable ->
             logger.w(throwable) { "Failed to fetch manifest for track $trackId" }
@@ -284,9 +287,7 @@ internal class StreamProxy(
         runCatching {
             httpClient.prepareRequest(segmentUrl) {
                 method = HttpMethod.Get
-                call.forwardRequestHeaderIfPresent(headers, HttpHeaders.Range)
-                call.forwardRequestHeaderIfPresent(headers, HttpHeaders.Accept)
-                call.forwardRequestHeaderIfPresent(headers, HttpHeaders.UserAgent)
+                applyUpstreamHeaders(call, this, segmentUrl, includeRange = true)
             }.execute { response -> respondWithSegment(call, response, trackId) }
         }.onFailure { throwable ->
             if (throwable is CancellationException) throw throwable
@@ -343,10 +344,7 @@ internal class StreamProxy(
             val failure = runCatching {
                 httpClient.prepareRequest(currentUrl) {
                     method = requestMethod
-                    call.forwardRequestHeaderIfPresent(headers, HttpHeaders.Range)
-                    call.forwardRequestHeaderIfPresent(headers, HttpHeaders.IfRange)
-                    call.forwardRequestHeaderIfPresent(headers, HttpHeaders.Accept)
-                    call.forwardRequestHeaderIfPresent(headers, HttpHeaders.UserAgent)
+                    applyUpstreamHeaders(call, this, currentUrl, includeRange = true)
                 }.execute { response ->
                     logger.i {
                         "[Req] upstream headers for $trackId after ${upstreamStart.elapsedNow()}: " +
@@ -578,6 +576,35 @@ internal class StreamProxy(
     private fun encodeUrl(url: String): String = url.encodeURLParameter()
     private fun decodeUrl(encoded: String): String = encoded.decodeURLQueryComponent()
 
+    private fun isYouTubeOrGoogleVideo(url: String): Boolean {
+        val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: ""
+        return host.endsWith("googlevideo.com") ||
+            host.endsWith("youtube.com") ||
+            url.contains("googlevideo.com", ignoreCase = true) ||
+            url.contains("youtube.com", ignoreCase = true)
+    }
+
+    private fun applyUpstreamHeaders(
+        call: ApplicationCall,
+        builder: io.ktor.client.request.HttpRequestBuilder,
+        targetUrl: String,
+        includeRange: Boolean
+    ) {
+        if (includeRange) {
+            call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.Range)
+            call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.IfRange)
+        }
+        call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.Accept)
+
+        if (isYouTubeOrGoogleVideo(targetUrl)) {
+            builder.headers[HttpHeaders.Referrer] = YOUTUBE_REFERER
+            builder.headers[HttpHeaders.UserAgent] = BROWSER_USER_AGENT
+        } else {
+            call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.UserAgent)
+            call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.Referrer)
+        }
+    }
+
     private fun ApplicationCall.forwardRequestHeaderIfPresent(
         builder: HeadersBuilder,
         headerName: String
@@ -590,7 +617,11 @@ internal class StreamProxy(
     private fun upstreamHeadersToForward(upstream: HttpResponse): Headers {
         return HeadersBuilder().apply {
             upstream.headers.forEach { name, values ->
-                values.forEach { value -> append(name, value) }
+                if (!name.equals(HttpHeaders.TransferEncoding, ignoreCase = true) &&
+                    !name.equals(HttpHeaders.Connection, ignoreCase = true)
+                ) {
+                    values.forEach { value -> append(name, value) }
+                }
             }
         }.build()
     }

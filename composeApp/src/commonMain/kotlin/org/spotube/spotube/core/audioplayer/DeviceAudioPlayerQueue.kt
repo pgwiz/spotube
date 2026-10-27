@@ -18,7 +18,12 @@
 package org.spotube.spotube.core.audioplayer
 
 import org.spotube.plugin_interfaces.plugin_apis.audio.StreamProtocol
+import org.spotube.plugin_interfaces.plugin_apis.metadata.artist.MetadataArtist
+import org.spotube.plugin_interfaces.plugin_apis.metadata.common.Thumbnail
+import org.spotube.plugin_interfaces.plugin_apis.metadata.track.MetadataTrack
 import org.spotube.spotube.core.di.injectLogger
+import org.spotube.spotube.core.newpipe.NewPipeService
+import org.spotube.spotube.core.newpipe.SearchKind
 import org.spotube.spotube.modules.blacklist.BlacklistRepository
 import org.spotube.spotube.modules.plugin.PluginProvider
 import org.spotube.spotube.modules.settings.SettingsProvider
@@ -330,19 +335,74 @@ class DeviceAudioPlayerQueue(
         isFetchingRecommendations = true
         logger.i { "Endless playback: fetching recommendations with ${seedTrackIds.size} seed tracks" }
 
-        val metadataService = pluginProvider.selectedMetadataPlugin.value ?: run {
-            logger.w { "Endless playback: no metadata plugin available" }
-            isFetchingRecommendations = false
-            return
+        val metadataService = pluginProvider.selectedMetadataPlugin.value
+        var recommendations: List<MetadataTrack> = emptyList()
+
+        if (metadataService != null) {
+            recommendations = runCatching {
+                metadataService.use {
+                    metadataTrackAPI.recommendationsBasedOnTracks(seedTrackIds, limit = 20)
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        if (recommendations.isEmpty()) {
+            logger.i { "Endless playback: metadata recommendations unavailable or empty, falling back to native YouTube radio mix" }
+            val newPipeService = NewPipeService()
+            for (seedTrack in seedTracks) {
+                val seed = seedTrack.track
+                val videoId = if (seed.id.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
+                    seed.id
+                } else {
+                    val extracted = seed.externalUri?.let { uri ->
+                        Regex("""[?&]v=([a-zA-Z0-9_-]{11})""").find(uri)?.groupValues?.get(1)
+                            ?: Regex("""youtu\.be/([a-zA-Z0-9_-]{11})""").find(uri)?.groupValues?.get(1)
+                    }
+                    extracted ?: runCatching {
+                        val artist = seed.artists.firstOrNull()?.name.orEmpty()
+                        newPipeService.searchVideos("${seed.title} $artist".trim(), SearchKind.Songs)
+                            .firstOrNull()?.id
+                    }.getOrNull()
+                }
+
+                if (!videoId.isNullOrBlank()) {
+                    val radioMix = runCatching { newPipeService.getRadioMix(videoId) }.getOrDefault(emptyList())
+                    if (radioMix.isNotEmpty()) {
+                        logger.i { "Endless playback: got ${radioMix.size} tracks from YouTube radio mix for video $videoId" }
+                        recommendations = radioMix.map { video ->
+                            MetadataTrack(
+                                id = video.id,
+                                title = video.title,
+                                durationMs = video.durationMs,
+                                trackNumber = null,
+                                discNumber = null,
+                                artists = listOf(
+                                    MetadataArtist.Basic(
+                                        id = video.uploader,
+                                        name = video.uploader,
+                                        thumbnails = emptyList(),
+                                        externalUri = null
+                                    )
+                                ),
+                                album = null,
+                                thumbnails = if (video.thumbnailUrl.isNotBlank()) {
+                                    listOf(Thumbnail(url = video.thumbnailUrl, width = 300, height = 300))
+                                } else null,
+                                explicit = null,
+                                popularity = null,
+                                isrcCode = null,
+                                externalUri = "https://www.youtube.com/watch?v=${video.id}"
+                            )
+                        }
+                        break
+                    }
+                }
+            }
         }
 
         try {
-            val recommendations = metadataService.use {
-                metadataTrackAPI.recommendationsBasedOnTracks(seedTrackIds, limit = 20)
-            }
-
             if (recommendations.isEmpty()) {
-                logger.w { "Endless playback: no recommendations returned" }
+                logger.w { "Endless playback: no recommendations or radio mix tracks found" }
                 isFetchingRecommendations = false
                 return
             }
@@ -369,7 +429,7 @@ class DeviceAudioPlayerQueue(
             logger.i { "Endless playback: adding ${newEntries.size} recommended tracks to queue" }
             addAllToQueue(newEntries)
         } catch (e: Exception) {
-            logger.e(e) { "Endless playback: failed to fetch recommendations" }
+            logger.e(e) { "Endless playback: failed to add recommendations to queue" }
         } finally {
             isFetchingRecommendations = false
         }
