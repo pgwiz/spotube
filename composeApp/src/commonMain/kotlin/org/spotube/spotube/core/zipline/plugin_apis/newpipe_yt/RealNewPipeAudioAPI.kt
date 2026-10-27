@@ -148,10 +148,10 @@ class RealNewPipeAudioAPI : AudioAPI, KoinComponent {
         val vParamRegex = Regex("""[?&]v=([a-zA-Z0-9_-]{11})(?:[&#]|$)""")
         vParamRegex.find(trimmed)?.groupValues?.get(1)?.let { return it }
 
-        val youtuBeRegex = Regex("""youtu\.be/([a-zA-Z0-9_-]{11})(?:[?#]|$)""")
+        val youtuBeRegex = Regex("""youtu\.be/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""")
         youtuBeRegex.find(trimmed)?.groupValues?.get(1)?.let { return it }
 
-        val pathRegex = Regex("""youtube\.com/(?:embed|v|shorts)/([a-zA-Z0-9_-]{11})(?:[?#]|$)""")
+        val pathRegex = Regex("""youtube\.com/(?:embed|v|shorts)/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""")
         pathRegex.find(trimmed)?.groupValues?.get(1)?.let { return it }
 
         return null
@@ -266,9 +266,10 @@ class RealNewPipeAudioAPI : AudioAPI, KoinComponent {
         // When confidence scoring yields no candidates >= 0.3, ensure the top relevance search
         // result is returned as fallback rather than throwing TrackNotFoundError or failing.
         val fallback = if (textSearchResults.isNotEmpty()) {
-            textSearchResults.values.toList()
-                .sortedByDescending { it.confidence } // stable: ties keep YouTube's relevance order
-                .take(5)
+            val list = textSearchResults.values.toList()
+            val topRelevance = list.first()
+            val rest = list.drop(1).sortedByDescending { it.confidence }
+            (listOf(topRelevance) + rest).take(5)
         } else if (ranked.isNotEmpty()) {
             ranked.take(5)
         } else {

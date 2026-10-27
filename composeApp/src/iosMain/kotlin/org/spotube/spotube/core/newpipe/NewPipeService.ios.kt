@@ -100,9 +100,11 @@ actual class NewPipeService {
                             url = item.url,
                             uploader = item.uploaderName ?: "Unknown",
                             durationMs = secondsToMs(item.duration),
-                            thumbnailUrl = item.thumbnails.first().url,
-                            id = Url(item.url).parameters["v"]
+                            thumbnailUrl = item.thumbnails.firstOrNull()?.url.orEmpty(),
+                            id = runCatching { Url(item.url).parameters["v"] }.getOrNull()
                                 ?: item.url.substringAfter("watch?v=", "").substringBefore("&")
+                                .takeIf { it.isNotEmpty() }
+                                ?: item.url.substringAfterLast("/")
                         )
                     } else {
                         null

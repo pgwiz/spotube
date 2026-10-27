@@ -355,8 +355,9 @@ class DeviceAudioPlayerQueue(
                     seed.id
                 } else {
                     val extracted = seed.externalUri?.let { uri ->
-                        Regex("""[?&]v=([a-zA-Z0-9_-]{11})""").find(uri)?.groupValues?.get(1)
-                            ?: Regex("""youtu\.be/([a-zA-Z0-9_-]{11})""").find(uri)?.groupValues?.get(1)
+                        Regex("""[?&]v=([a-zA-Z0-9_-]{11})(?:[&#]|$)""").find(uri)?.groupValues?.get(1)
+                            ?: Regex("""youtu\.be/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""").find(uri)?.groupValues?.get(1)
+                            ?: Regex("""youtube\.com/(?:embed|v|shorts)/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""").find(uri)?.groupValues?.get(1)
                     }
                     extracted ?: runCatching {
                         val artist = seed.artists.firstOrNull()?.name.orEmpty()

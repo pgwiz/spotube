@@ -580,8 +580,10 @@ internal class StreamProxy(
         val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: ""
         return host.endsWith("googlevideo.com") ||
             host.endsWith("youtube.com") ||
+            host.endsWith("youtu.be") ||
             url.contains("googlevideo.com", ignoreCase = true) ||
-            url.contains("youtube.com", ignoreCase = true)
+            url.contains("youtube.com", ignoreCase = true) ||
+            url.contains("youtu.be", ignoreCase = true)
     }
 
     private fun applyUpstreamHeaders(
@@ -598,6 +600,7 @@ internal class StreamProxy(
 
         if (isYouTubeOrGoogleVideo(targetUrl)) {
             builder.headers[HttpHeaders.Referrer] = YOUTUBE_REFERER
+            builder.headers[HttpHeaders.Origin] = "https://www.youtube.com"
             builder.headers[HttpHeaders.UserAgent] = BROWSER_USER_AGENT
         } else {
             call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.UserAgent)
@@ -610,7 +613,7 @@ internal class StreamProxy(
         headerName: String
     ) {
         request.headers.getAll(headerName)?.forEach { value ->
-            builder.append(headerName, value)
+            builder[headerName] = value
         }
     }
 
