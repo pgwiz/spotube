@@ -616,8 +616,9 @@ class PluginManager(
             val newState = PluginManagerStates.Data(
                 plugins = updatedPlugins,
                 selectedPlugins = updatedSelectedPlugins,
-                generation = currentState.generation
+                generation = currentState.generation + 1
             )
+            logger.d { "removePlugin: bumped generation to ${newState.generation} after removing ${plugin.id}" }
 
             withContext(Dispatchers.IO) {
                 val pluginDir = pluginsDir / plugin.id.toPath()

@@ -155,6 +155,12 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
         if (avPlayer.currentItem == null) {
             _playerState.tryEmit(PlayerState.IDLE)
         }
+
+        mediaSession.update(
+            item = _currentMediaItem.value,
+            positionSeconds = _position.value.inWholeMilliseconds / 1000.0,
+            durationSeconds = _duration.value.inWholeMilliseconds / 1000.0,
+            isPlaying = status == AVPlayerTimeControlStatusPlaying)
     }
 
     private fun resolveState(): PlayerState {
@@ -178,6 +184,11 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
 
     actual override suspend fun pause() {
         avPlayer.pause()
+        mediaSession.update(
+            item = _currentMediaItem.value,
+            positionSeconds = _position.value.inWholeMilliseconds / 1000.0,
+            durationSeconds = _duration.value.inWholeMilliseconds / 1000.0,
+            isPlaying = false)
     }
 
     actual override suspend fun stop() {

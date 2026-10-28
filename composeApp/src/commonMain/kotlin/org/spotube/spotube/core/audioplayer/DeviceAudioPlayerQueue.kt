@@ -137,14 +137,15 @@ class DeviceAudioPlayerQueue(
         startPosition: Int,
         collectionEntry: QueueCollectionEntry?) {
         logger.i { "Loading queue with ${entries.size} entries, autoPlay=$autoPlay, startPosition=$startPosition" }
-        val mediaItems = entries.mapNotNull { it.toMediaItem() }
-        if (mediaItems.isEmpty()) {
+        val paired = entries.mapNotNull { entry -> entry.toMediaItem()?.let { mediaItem -> mediaItem to entry } }
+        if (paired.isEmpty()) {
             logger.w { "load: no valid media items after filtering blanks" }
         }
+        val mediaItems = paired.map { it.first }
         val normalizedStartPosition =
             if (mediaItems.isEmpty()) 0 else startPosition.coerceIn(0, mediaItems.lastIndex)
         logger.d { "Normalized start position: $startPosition -> $normalizedStartPosition" }
-        entryByMediaUrl.value = mediaItems.associate { it.url to entries.firstOrNull { e -> e.toMediaItem()?.url == it.url }!! }
+        entryByMediaUrl.value = paired.associate { (mediaItem, entry) -> mediaItem.url to entry }
         updateCollectionContext(collectionEntry)
         audioPlayer.load(mediaItems, autoPlay, normalizedStartPosition)
         persistQueueStateIfReady()
@@ -170,16 +171,14 @@ class DeviceAudioPlayerQueue(
         }
 
         logger.i { "Adding ${entries.size} entries to queue" }
-        val mediaItems = entries.mapNotNull { it.toMediaItem() }
-        if (mediaItems.isEmpty()) {
+        val paired = entries.mapNotNull { entry -> entry.toMediaItem()?.let { mediaItem -> mediaItem to entry } }
+        if (paired.isEmpty()) {
             logger.w { "addAllToQueue: all entries had blank urls, skipping" }
             return
         }
-        val validEntries = entries.zip(mediaItems).map { (entry) ->
-            entry
-        }
-        entryByMediaUrl.update {
-            it + mediaItems.zip(validEntries).associate { (mediaItem, entry) -> mediaItem.url to entry }
+        val mediaItems = paired.map { it.first }
+        entryByMediaUrl.update { current ->
+            current + paired.associate { (mediaItem, entry) -> mediaItem.url to entry }
         }
 
         updateCollectionContext(collectionEntry)
@@ -199,14 +198,14 @@ class DeviceAudioPlayerQueue(
         }
 
         logger.i { "Adding ${entries.size} entries after current position" }
-        val mediaItems = entries.mapNotNull { it.toMediaItem() }
-        if (mediaItems.isEmpty()) {
+        val paired = entries.mapNotNull { entry -> entry.toMediaItem()?.let { mediaItem -> mediaItem to entry } }
+        if (paired.isEmpty()) {
             logger.w { "addAllAfterCurrent: all entries had blank urls, skipping" }
             return
         }
-        val validEntries = entries.zip(mediaItems).map { (entry) -> entry }
-        entryByMediaUrl.update {
-            it + mediaItems.zip(validEntries).associate { (mediaItem, entry) -> mediaItem.url to entry }
+        val mediaItems = paired.map { it.first }
+        entryByMediaUrl.update { current ->
+            current + paired.associate { (mediaItem, entry) -> mediaItem.url to entry }
         }
 
         mediaItems.forEach { mediaItem ->
@@ -218,7 +217,9 @@ class DeviceAudioPlayerQueue(
     }
 
     override suspend fun removeFromQueue(entry: QueueEntry) {
-        val mediaUrl = entry.toMediaItem()?.url ?: return
+        val mediaUrl = entryByMediaUrl.value.entries.firstOrNull { it.value == entry }?.key
+            ?: entry.toMediaItem()?.url
+            ?: return
         removeFromQueueByMediaUrl(mediaUrl)
     }
 
@@ -323,7 +324,7 @@ class DeviceAudioPlayerQueue(
         val settings = settingsProvider.settingsState.value ?: return
         if (!settings.enableEndlessPlayback) return
 
-        val queue = queueFlow.value
+        val queue = getQueue()
         val streamingTracks = queue.filterIsInstance<QueueEntry.StreamingTrack>()
         if (streamingTracks.isEmpty()) return
 
@@ -359,23 +360,20 @@ class DeviceAudioPlayerQueue(
                 val videoId = if (seed.id.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
                     seed.id
                 } else {
-                    val extracted = seed.externalUri?.let { uri ->
+                    seed.externalUri?.let { uri ->
                         Regex("""[?&]v=([a-zA-Z0-9_-]{11})(?:[&#]|$)""").find(uri)?.groupValues?.get(1)
                             ?: Regex("""youtu\.be/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""").find(uri)?.groupValues?.get(1)
                             ?: Regex("""youtube\.com/(?:embed|v|shorts)/([a-zA-Z0-9_-]{11})(?:[?#/]|$)""").find(uri)?.groupValues?.get(1)
                     }
-                    extracted ?: runCatching {
-                        val artist = seed.artists.firstOrNull()?.name.orEmpty()
-                        newPipeService.searchVideos("${seed.title} $artist".trim(), SearchKind.Songs)
-                            .firstOrNull()?.id
-                    }.getOrNull()
                 }
 
                 if (!videoId.isNullOrBlank()) {
                     val radioMix = runCatching { newPipeService.getRadioMix(videoId) }.getOrDefault(emptyList())
-                    if (radioMix.isNotEmpty()) {
-                        logger.i { "Endless playback: got ${radioMix.size} tracks from YouTube radio mix for video $videoId" }
-                        recommendations = radioMix.map { video ->
+                    val existingTrackIds = queue.filterIsInstance<QueueEntry.StreamingTrack>().map { it.track.id }.toSet()
+                    val newRadioTracks = radioMix.filter { it.id !in existingTrackIds && it.id != videoId }
+                    if (newRadioTracks.isNotEmpty()) {
+                        logger.i { "Endless playback: got ${newRadioTracks.size} new tracks from YouTube radio mix for video $videoId" }
+                        recommendations = newRadioTracks.map { video ->
                             MetadataTrack(
                                 id = video.id,
                                 title = video.title,
@@ -498,12 +496,13 @@ class DeviceAudioPlayerQueue(
             return
         }
 
-        val mediaItems = state.entries.mapNotNull { it.toMediaItem() }
-        if (mediaItems.isEmpty()) {
+        val paired = state.entries.mapNotNull { entry -> entry.toMediaItem()?.let { mediaItem -> mediaItem to entry } }
+        if (paired.isEmpty()) {
             logger.w { "restorePersistedState: all entries had blank urls" }
             return
         }
-        entryByMediaUrl.value = mediaItems.associate { it.url to state.entries.firstOrNull { e -> e.toMediaItem()?.url == it.url }!! }
+        val mediaItems = paired.map { it.first }
+        entryByMediaUrl.value = paired.associate { (mediaItem, entry) -> mediaItem.url to entry }
         val normalizedStartPosition = state.currentIndex.coerceIn(0, mediaItems.lastIndex)
         logger.d { "Loading restored playlist with normalized start position: ${state.currentIndex} -> $normalizedStartPosition" }
         audioPlayer.load(mediaItems, autoPlay = false, startPosition = normalizedStartPosition)

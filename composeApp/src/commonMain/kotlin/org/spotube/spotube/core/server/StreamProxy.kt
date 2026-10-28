@@ -612,17 +612,23 @@ internal class StreamProxy(
                 "ANDROID" -> {
                     builder.headers[HttpHeaders.UserAgent] = ANDROID_USER_AGENT
                     builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove("Referer")
                     builder.headers.remove(HttpHeaders.Origin)
+                    builder.headers.remove("Origin")
                 }
                 "IOS" -> {
                     builder.headers[HttpHeaders.UserAgent] = IOS_USER_AGENT
                     builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove("Referer")
                     builder.headers.remove(HttpHeaders.Origin)
+                    builder.headers.remove("Origin")
                 }
                 "VISIONOS" -> {
                     builder.headers[HttpHeaders.UserAgent] = VISIONOS_USER_AGENT
                     builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove("Referer")
                     builder.headers.remove(HttpHeaders.Origin)
+                    builder.headers.remove("Origin")
                 }
                 else -> {
                     builder.headers[HttpHeaders.Referrer] = YOUTUBE_REFERER

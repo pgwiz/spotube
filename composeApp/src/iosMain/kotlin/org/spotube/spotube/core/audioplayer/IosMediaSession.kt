@@ -55,6 +55,8 @@ internal class IosMediaSession {
     private var onNext: (() -> Unit)? = null
     private var onPrevious: (() -> Unit)? = null
 
+    private var lastIsPlaying = false
+
     fun configure(
         onPlay: () -> Unit,
         onPause: () -> Unit,
@@ -112,10 +114,12 @@ internal class IosMediaSession {
             info.setObject(positionSeconds, forKey = MPNowPlayingInfoPropertyElapsedPlaybackTime)
         }
         info.setObject(if (isPlaying) 1.0 else 0.0, forKey = MPNowPlayingInfoPropertyPlaybackRate)
+        lastIsPlaying = isPlaying
         nowPlayingInfoCenter.nowPlayingInfo = info as NSDictionary
     }
 
     fun clear() {
+        lastIsPlaying = false
         nowPlayingInfoCenter.nowPlayingInfo = null
         notificationTokens.forEach { notificationCenter.removeObserver(it) }
         notificationTokens.clear()
@@ -158,6 +162,15 @@ internal class IosMediaSession {
         remoteCommandTokens += remoteCommandCenter.pauseCommand to
             remoteCommandCenter.pauseCommand.addTargetWithHandler {
             onPause?.invoke()
+            MPRemoteCommandHandlerStatusSuccess
+        }
+        remoteCommandTokens += remoteCommandCenter.togglePlayPauseCommand to
+            remoteCommandCenter.togglePlayPauseCommand.addTargetWithHandler {
+            if (lastIsPlaying) {
+                onPause?.invoke()
+            } else {
+                onPlay?.invoke()
+            }
             MPRemoteCommandHandlerStatusSuccess
         }
         remoteCommandTokens += remoteCommandCenter.changePlaybackPositionCommand to

@@ -462,6 +462,10 @@ class DownloadManager(
                 }
                 applyClientHeaders(url)
             }
+            if (!response.status.isSuccess() && response.status != HttpStatusCode.PartialContent) {
+                logger.w { "[Download $id] PROBE returned HTTP ${response.status.value}; failing download early" }
+                throw DownloadException(getString(Res.string.downloads_error_http, response.status.value))
+            }
             val contentRange = response.headers[HttpHeaders.ContentRange]
             val totalFromContentRange = contentRange?.substringAfterLast('/')?.trim()?.toLongOrNull()
             val contentLength = totalFromContentRange ?: response.contentLength() ?: 0L
@@ -514,17 +518,23 @@ class DownloadManager(
                 "ANDROID" -> {
                     headers[HttpHeaders.UserAgent] = ANDROID_USER_AGENT
                     headers.remove(HttpHeaders.Referrer)
+                    headers.remove("Referer")
                     headers.remove(HttpHeaders.Origin)
+                    headers.remove("Origin")
                 }
                 "IOS" -> {
                     headers[HttpHeaders.UserAgent] = IOS_USER_AGENT
                     headers.remove(HttpHeaders.Referrer)
+                    headers.remove("Referer")
                     headers.remove(HttpHeaders.Origin)
+                    headers.remove("Origin")
                 }
                 "VISIONOS" -> {
                     headers[HttpHeaders.UserAgent] = VISIONOS_USER_AGENT
                     headers.remove(HttpHeaders.Referrer)
+                    headers.remove("Referer")
                     headers.remove(HttpHeaders.Origin)
+                    headers.remove("Origin")
                 }
                 else -> {
                     headers[HttpHeaders.Referrer] = YOUTUBE_REFERER
