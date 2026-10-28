@@ -12,6 +12,52 @@ on:
           - stable
           - beta
           - nightly
+      target_preset:
+        description: 'Target preset'
+        required: true
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - desktop
+          - desktop-no-mac
+          - mobile
+          - windows
+          - linux
+          - macos
+          - android
+          - ios
+          - custom
+      build_windows:
+        description: '  -> Windows x86_64 (.exe) (if custom)'
+        required: false
+        type: boolean
+        default: true
+      build_linux:
+        description: '  -> Linux x86_64 (.deb, .rpm, .AppImage, .tar.xz) (if custom)'
+        required: false
+        type: boolean
+        default: true
+      build_linux_arm64:
+        description: '  -> Linux ARM64 (.deb, .rpm, .AppImage, .tar.xz) (if custom)'
+        required: false
+        type: boolean
+        default: true
+      build_macos:
+        description: '  -> macOS Universal (.dmg) (if custom)'
+        required: false
+        type: boolean
+        default: true
+      build_android:
+        description: '  -> Android (.apk) (if custom)'
+        required: false
+        type: boolean
+        default: true
+      build_ios:
+        description: '  -> iOS (.ipa) (if custom)'
+        required: false
+        type: boolean
+        default: true
       dry_run:
         description: 'Dry run (build & upload artifacts only, skip creating release)'
         required: false
@@ -78,6 +124,7 @@ jobs:
 
   build-android:
     name: Android
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'mobile' || inputs.target_preset == 'android' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_android) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: ubuntu-latest
@@ -155,6 +202,7 @@ jobs:
 
   build-linux:
     name: Linux Desktop
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'linux' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_linux) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: ubuntu-latest
@@ -268,6 +316,7 @@ jobs:
 
   build-linux-arm64:
     name: Linux Desktop (aarch64)
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'linux' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_linux_arm64) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: ubuntu-24.04-arm
@@ -388,6 +437,7 @@ jobs:
 
   build-windows:
     name: Windows Desktop
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'windows' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_windows) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: windows-latest
@@ -451,6 +501,7 @@ jobs:
 
   build-macos:
     name: macOS Desktop
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'macos' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_macos) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: macos-latest
@@ -519,6 +570,7 @@ jobs:
 
   build-ios:
     name: iOS
+    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'mobile' || inputs.target_preset == 'ios' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_ios) }}
     needs: prepare-deps
     timeout-minutes: 120
     runs-on: macos-latest
@@ -588,8 +640,9 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    if: ${{ !inputs.dry_run }}
+    if: ${{ !inputs.dry_run && !cancelled() && always() }}
     needs:
+      - prepare-deps
       - build-android
       - build-linux
       - build-linux-arm64
@@ -639,9 +692,23 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v8
 
+      - name: Verify build artifacts exist
+        id: check_artifacts
+        run: |
+          COUNT=$(find . -maxdepth 2 -type f \( -name "*.apk" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.tar.xz" -o -name "*.exe" -o -name "*.dmg" -o -name "*.ipa" \) 2>/dev/null | wc -l)
+          echo "Found $COUNT build artifact(s)."
+          if [ "$COUNT" -eq 0 ]; then
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
+            echo "No build artifacts were found. Skipping release publish step."
+          else
+            echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate release notes
+        if: steps.check_artifacts.outputs.has_artifacts == 'true'
         run: |
           echo "## Downloads" > release-notes.md
           echo "" >> release-notes.md
@@ -649,19 +716,20 @@ jobs:
             if [ -d "$dir" ]; then
               echo "### $dir" >> release-notes.md
               for f in "$dir"/*; do
-                echo "- \`$(basename "$f")\`" >> release-notes.md
+                [ -f "$f" ] && echo "- \`$(basename "$f")\`" >> release-notes.md
               done
               echo "" >> release-notes.md
             fi
           done
 
-      - name: Create Release
+      - name: Create or Update Release
+        if: steps.check_artifacts.outputs.has_artifacts == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           # A new tag (stable) would otherwise point at the default branch instead of the built commit
           target_commitish: ${{ github.sha }}
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           name: ${{ steps.vars.outputs.release_name }}
           body_path: release-notes.md
           draft: ${{ steps.vars.outputs.is_draft }}
