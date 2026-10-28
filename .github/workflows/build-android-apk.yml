@@ -68,21 +68,17 @@ jobs:
           chmod +x ../gradlew
           if [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > "${{ github.workspace }}/composeApp/upload-keystore.jks"
-            cat >> local.properties <<EOF
-release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
-release.signing.storePassword=${KEYSTORE_PASSWORD}
-release.signing.keyAlias=${KEYSTORE_KEY_ALIAS}
-release.signing.keyPassword=${KEYSTORE_KEY_PASSWORD}
-EOF
+            echo "release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks" >> local.properties
+            echo "release.signing.storePassword=${KEYSTORE_PASSWORD}" >> local.properties
+            echo "release.signing.keyAlias=${KEYSTORE_KEY_ALIAS}" >> local.properties
+            echo "release.signing.keyPassword=${KEYSTORE_KEY_PASSWORD}" >> local.properties
           else
             echo "No custom keystore secret found, generating build keystore..."
             keytool -genkey -v -keystore "${{ github.workspace }}/composeApp/upload-keystore.jks" -alias spotube -keyalg RSA -keysize 2048 -validity 10000 -storepass spotubepass -keypass spotubepass -dname "CN=Spotube, OU=Mobile, O=Spotube, C=US"
-            cat >> local.properties <<EOF
-release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
-release.signing.storePassword=spotubepass
-release.signing.keyAlias=spotube
-release.signing.keyPassword=spotubepass
-EOF
+            echo "release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks" >> local.properties
+            echo "release.signing.storePassword=spotubepass" >> local.properties
+            echo "release.signing.keyAlias=spotube" >> local.properties
+            echo "release.signing.keyPassword=spotubepass" >> local.properties
           fi
 
       - name: Assemble Android Release APK
