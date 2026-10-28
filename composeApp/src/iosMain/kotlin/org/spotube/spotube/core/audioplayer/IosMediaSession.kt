@@ -23,8 +23,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import platform.AVFAudio.AVAudioSession
 import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.AVAudioSessionModeDefault
-import platform.Foundation.NSDictionary
-import platform.Foundation.NSMutableDictionary
+import platform.AVFAudio.AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSOperationQueue
 import platform.MediaPlayer.MPChangePlaybackPositionCommandEvent
@@ -73,21 +72,32 @@ internal class IosMediaSession {
         if (configured) return
         configured = true
 
-        audioSession.setCategory(
-            category = AVAudioSessionCategoryPlayback,
-            mode = AVAudioSessionModeDefault,
-            options = 0u,
-            error = null)
+        runCatching {
+            audioSession.setCategory(
+                category = AVAudioSessionCategoryPlayback,
+                mode = AVAudioSessionModeDefault,
+                options = 0u,
+                error = null
+            )
+        }
         registerAudioSessionNotifications()
         registerRemoteCommands()
     }
 
     fun activate() {
-        audioSession.setActive(true, error = null)
+        runCatching {
+            audioSession.setActive(active = true, withOptions = 0u, error = null)
+        }
     }
 
     fun deactivate() {
-        audioSession.setActive(false, error = null)
+        runCatching {
+            audioSession.setActive(
+                active = false,
+                withOptions = AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation,
+                error = null
+            )
+        }
     }
 
     fun update(
@@ -101,21 +111,21 @@ internal class IosMediaSession {
             return
         }
 
-        val info = NSMutableDictionary()
-        info.setObject(item.title, forKey = MPMediaItemPropertyTitle)
-        info.setObject(item.artist, forKey = MPMediaItemPropertyArtist)
+        val info = mutableMapOf<Any?, Any?>()
+        info[MPMediaItemPropertyTitle] = item.title
+        info[MPMediaItemPropertyArtist] = item.artist
         item.album.takeIf { it.isNotBlank() }?.let {
-            info.setObject(it, forKey = MPMediaItemPropertyAlbumTitle)
+            info[MPMediaItemPropertyAlbumTitle] = it
         }
         if (durationSeconds.isFinite() && durationSeconds > 0) {
-            info.setObject(durationSeconds, forKey = MPMediaItemPropertyPlaybackDuration)
+            info[MPMediaItemPropertyPlaybackDuration] = durationSeconds
         }
         if (positionSeconds.isFinite() && positionSeconds >= 0) {
-            info.setObject(positionSeconds, forKey = MPNowPlayingInfoPropertyElapsedPlaybackTime)
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = positionSeconds
         }
-        info.setObject(if (isPlaying) 1.0 else 0.0, forKey = MPNowPlayingInfoPropertyPlaybackRate)
+        info[MPNowPlayingInfoPropertyPlaybackRate] = if (isPlaying) 1.0 else 0.0
         lastIsPlaying = isPlaying
-        nowPlayingInfoCenter.nowPlayingInfo = info as NSDictionary
+        nowPlayingInfoCenter.nowPlayingInfo = info
     }
 
     fun clear() {
@@ -137,17 +147,20 @@ internal class IosMediaSession {
         notificationTokens += notificationCenter.addObserverForName(
             name = platform.AVFAudio.AVAudioSessionInterruptionNotification,
             `object` = audioSession,
-            queue = NSOperationQueue.mainQueue()) { notification ->
-            val type = notification?.userInfo?.get(
-                platform.AVFAudio.AVAudioSessionInterruptionTypeKey) as? Number
-            if (type?.intValue == platform.AVFAudio.AVAudioSessionInterruptionTypeBegan) {
+            queue = NSOperationQueue.mainQueue()
+        ) { notification ->
+            val type = (notification?.userInfo?.get(
+                platform.AVFAudio.AVAudioSessionInterruptionTypeKey
+            ) as? Number)?.toLong()?.toULong()
+            if (type == platform.AVFAudio.AVAudioSessionInterruptionTypeBegan) {
                 onPause?.invoke()
-            } else if (type?.intValue == platform.AVFAudio.AVAudioSessionInterruptionTypeEnded) {
+            } else if (type == platform.AVFAudio.AVAudioSessionInterruptionTypeEnded) {
                 activate()
-                val options = notification?.userInfo?.get(
-                    platform.AVFAudio.AVAudioSessionInterruptionOptionKey) as? Number
-                val shouldResume = (options?.intValue ?: 0) and
-                    platform.AVFAudio.AVAudioSessionInterruptionOptionShouldResume.toInt() != 0
+                val options = (notification?.userInfo?.get(
+                    platform.AVFAudio.AVAudioSessionInterruptionOptionKey
+                ) as? Number)?.toLong()?.toULong() ?: 0uL
+                val shouldResume = (options and
+                    platform.AVFAudio.AVAudioSessionInterruptionOptionShouldResume) != 0uL
                 if (shouldResume) onPlay?.invoke()
             }
         }

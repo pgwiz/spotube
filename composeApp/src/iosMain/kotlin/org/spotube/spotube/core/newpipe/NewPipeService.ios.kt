@@ -88,29 +88,6 @@ actual class NewPipeService {
     }
 
     actual suspend fun getRadioMix(videoId: String): List<VideoSearchResult> {
-        return withContext(Dispatchers.IO) {
-            runCatching {
-                val extractor = YouTube.getPlaylistExtractor("https://www.youtube.com/watch?v=$videoId&list=RD$videoId")
-                extractor.fetchPage()
-                val results = extractor.initialPage
-                results.items.mapNotNull { item ->
-                    if (item is StreamInfoItem) {
-                        VideoSearchResult(
-                            title = item.name,
-                            url = item.url,
-                            uploader = item.uploaderName ?: "Unknown",
-                            durationMs = secondsToMs(item.duration),
-                            thumbnailUrl = item.thumbnails.firstOrNull()?.url.orEmpty(),
-                            id = runCatching { Url(item.url).parameters["v"] }.getOrNull()
-                                ?: item.url.substringAfter("watch?v=", "").substringBefore("&")
-                                .takeIf { it.isNotEmpty() }
-                                ?: item.url.substringAfterLast("/")
-                        )
-                    } else {
-                        null
-                    }
-                }
-            }.getOrDefault(emptyList())
-        }
+        return emptyList()
     }
 }
