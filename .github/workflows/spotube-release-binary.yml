@@ -69,9 +69,8 @@ on:
         type: boolean
         default: false
 
-# Read-only by default; only create-release gets write access
 permissions:
-  contents: read
+  contents: write
 
 # Never cancel a running release when another is dispatched, and let stable, beta and nightly run side by side
 concurrency:
@@ -724,11 +723,9 @@ jobs:
 
       - name: Create or Update Release
         if: steps.check_artifacts.outputs.has_artifacts == 'true'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
-          # A new tag (stable) would otherwise point at the default branch instead of the built commit
-          target_commitish: ${{ github.sha }}
           fail_on_unmatched_files: false
           name: ${{ steps.vars.outputs.release_name }}
           body_path: release-notes.md
