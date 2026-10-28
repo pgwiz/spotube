@@ -2,7 +2,17 @@
 
 ## [Unreleased]
 
+### Features
+- **audioplayer/ios**: Implement `IosMediaSession` with `AVAudioSession`, `MPNowPlayingInfoCenter`, and `MPRemoteCommandCenter` for lock-screen / Control Center media controls and background audio playback (PR #3170).
+- **audioplayer/ios**: Enable direct streaming resolution for iOS playback in `DeviceAudioPlayerQueue.toMediaItem` (PR #3170).
+- **audioplayer/DeviceAudioPlayerQueue**: Implement complete 4-tier endless playback recommendation cascade: metadata recommendations, native YouTube radio mix, album tracks, and artist top tracks (PR #3092, PR #3134).
+- **plugin/PluginManager**: Auto-select vacant ability slots on plugin installation and recover fallback providers on plugin removal (PR #3147).
+
 ### Fixes
+- **build/android**: Switch `desugar_jdk_libs` to `com.android.tools:desugar_jdk_libs_nio` to resolve Android 9-12 `NoSuchMethodError: java.net.URLEncoder.encode` (PR #3132).
+- **server/StreamProxy**: Harden YouTube/GoogleVideo proxy streaming against HTTP 403 Forbidden by inspecting client parameter `c` (`ANDROID`, `IOS`, `VISIONOS`), injecting matching mobile User-Agents, and stripping `Origin` and `Referer` on mobile streams (PR #3150).
+- **downloads/DownloadManager**: Prevent HTTP 403 Forbidden on YouTube audio downloads by injecting matching client User-Agents and using `Range: bytes=0-0` byte-range probes instead of bare `HEAD` requests (PR #3150).
+- **server/StreamingUrlRepository**: Evict stale cached track sources from `MatchedTracksRepository` when cached source resolution fails before falling back to fresh track lookups (PR #3092, PR #3134).
 - **server/StreamProxy**: Prevent GoogleVideo CDN HTTP 403 Forbidden by injecting `Referer: https://www.youtube.com/`, `Origin: https://www.youtube.com`, and browser `User-Agent` headers on `googlevideo.com`, `youtube.com`, and `youtu.be` proxy requests, preserving stream range headers (`Range`, `If-Range`) without header duplication, and filtering hop-by-hop headers.
 - **newpipe/RealNewPipeAudioAPI**: Fix YouTube video ID extraction when `track.externalUri` contains YouTube URLs (`v=`, `youtu.be`, `/embed/`, `/shorts/`, with trailing slash/query/fragment support) instead of passing raw Spotify track IDs to video info lookups.
 - **newpipe/RealNewPipeAudioAPI**: Improve track matching and scoring for Topic channels, VEVO uploads, and official variants with relaxed duration bins, and guarantee top relevance search result is prioritized at index 0 when confidence scoring yields no candidates $\ge 0.3$.

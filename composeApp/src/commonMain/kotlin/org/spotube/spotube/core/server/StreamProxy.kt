@@ -76,6 +76,12 @@ internal class StreamProxy(
         private const val YOUTUBE_REFERER = "https://www.youtube.com/"
         private const val BROWSER_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        private const val ANDROID_USER_AGENT =
+            "com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip"
+        private const val IOS_USER_AGENT =
+            "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+        private const val VISIONOS_USER_AGENT =
+            "com.google.visionos.youtube/1.04(RealityDevice17,1; U; CPU visionOS 26_6_0 like Mac OS X; US)"
     }
 
     private val fileSystem = FileSystem.SYSTEM
@@ -599,9 +605,31 @@ internal class StreamProxy(
         call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.Accept)
 
         if (isYouTubeOrGoogleVideo(targetUrl)) {
-            builder.headers[HttpHeaders.Referrer] = YOUTUBE_REFERER
-            builder.headers[HttpHeaders.Origin] = "https://www.youtube.com"
-            builder.headers[HttpHeaders.UserAgent] = BROWSER_USER_AGENT
+            val clientParam = runCatching { Url(targetUrl).parameters["c"]?.uppercase() }.getOrNull()
+                ?: Regex("""[?&]c=([^&#]+)""").find(targetUrl)?.groupValues?.get(1)?.uppercase()
+
+            when (clientParam) {
+                "ANDROID" -> {
+                    builder.headers[HttpHeaders.UserAgent] = ANDROID_USER_AGENT
+                    builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove(HttpHeaders.Origin)
+                }
+                "IOS" -> {
+                    builder.headers[HttpHeaders.UserAgent] = IOS_USER_AGENT
+                    builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove(HttpHeaders.Origin)
+                }
+                "VISIONOS" -> {
+                    builder.headers[HttpHeaders.UserAgent] = VISIONOS_USER_AGENT
+                    builder.headers.remove(HttpHeaders.Referrer)
+                    builder.headers.remove(HttpHeaders.Origin)
+                }
+                else -> {
+                    builder.headers[HttpHeaders.Referrer] = YOUTUBE_REFERER
+                    builder.headers[HttpHeaders.Origin] = "https://www.youtube.com"
+                    builder.headers[HttpHeaders.UserAgent] = BROWSER_USER_AGENT
+                }
+            }
         } else {
             call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.UserAgent)
             call.forwardRequestHeaderIfPresent(builder.headers, HttpHeaders.Referrer)

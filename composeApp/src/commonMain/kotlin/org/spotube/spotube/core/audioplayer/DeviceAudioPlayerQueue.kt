@@ -42,6 +42,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
+import org.spotube.spotube.PlatformType
+import org.spotube.spotube.core.server.StreamingUrlRepository
+import org.spotube.spotube.getPlatform
 import kotlin.random.Random
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -53,6 +57,7 @@ class DeviceAudioPlayerQueue(
     private val blacklistRepository: BlacklistRepository) : AudioPlayerQueue, KoinComponent {
 
     private val logger by injectLogger<DeviceAudioPlayerQueue>()
+    private val streamingUrlRepository by inject<StreamingUrlRepository>()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -401,9 +406,48 @@ class DeviceAudioPlayerQueue(
             }
         }
 
+        if (recommendations.isEmpty() && metadataService != null) {
+            val albumId = seedTracks.mapNotNull { it.track.album?.id }.firstOrNull { it.isNotBlank() }
+            if (!albumId.isNullOrBlank()) {
+                logger.i { "Endless playback: radio mix unavailable or empty, falling back to album tracks for album $albumId" }
+                val albumTracks = runCatching {
+                    metadataService.use {
+                        metadataAlbumAPI.getAlbumTracks(albumId).items
+                    }
+                }.getOrDefault(emptyList())
+
+                val existingTrackIds = queue.filterIsInstance<QueueEntry.StreamingTrack>().map { it.track.id }.toSet()
+                val newAlbumTracks = albumTracks.filter { it.id !in existingTrackIds }
+                if (newAlbumTracks.isNotEmpty()) {
+                    logger.i { "Endless playback: got ${newAlbumTracks.size} remaining album tracks for album $albumId" }
+                    recommendations = newAlbumTracks
+                }
+            }
+        }
+
+        if (recommendations.isEmpty() && metadataService != null) {
+            logger.i { "Endless playback: album tracks unavailable or empty, falling back to artist top tracks" }
+            val existingTrackIds = queue.filterIsInstance<QueueEntry.StreamingTrack>().map { it.track.id }.toSet()
+            val artistIds = seedTracks.flatMap { it.track.artists }.map { it.id }.filter { it.isNotBlank() }.distinct()
+            for (artistId in artistIds) {
+                val topTracks = runCatching {
+                    metadataService.use {
+                        metadataArtistAPI.getArtistTop10Tracks(artistId)
+                    }
+                }.getOrDefault(emptyList())
+
+                val newTracks = topTracks.filter { it.id !in existingTrackIds }
+                if (newTracks.isNotEmpty()) {
+                    logger.i { "Endless playback: got ${newTracks.size} top tracks for artist $artistId" }
+                    recommendations = newTracks
+                    break
+                }
+            }
+        }
+
         try {
             if (recommendations.isEmpty()) {
-                logger.w { "Endless playback: no recommendations or radio mix tracks found" }
+                logger.w { "Endless playback: no recommendations, radio mix, album tracks, or artist top tracks found" }
                 isFetchingRecommendations = false
                 return
             }
@@ -517,7 +561,25 @@ class DeviceAudioPlayerQueue(
     private suspend fun QueueEntry.toMediaItem(): MediaItem? {
         return when (this) {
             is QueueEntry.StreamingTrack -> {
-                val resolvedUrl = url.ifBlank { buildStreamingUrl(track.id, protocol) }
+                val isIos = getPlatform().type == PlatformType.IOS
+                val requiresIosResolution = isIos && (
+                    url.isBlank() ||
+                        url.startsWith("http://127.0.0.1") ||
+                        url.startsWith("https://127.0.0.1") ||
+                        url.startsWith("http://[::1]") ||
+                        url.startsWith("https://[::1]") ||
+                        url.startsWith("http://localhost") ||
+                        url.startsWith("https://localhost"))
+                val resolvedStream = if (requiresIosResolution) {
+                    streamingUrlRepository.resolveStreamInfo(track)
+                } else {
+                    null
+                }
+                val resolvedUrl = if (requiresIosResolution) {
+                    resolvedStream?.url ?: buildStreamingUrl(track.id, protocol)
+                } else {
+                    url.ifBlank { buildStreamingUrl(track.id, protocol) }
+                }
                 if (resolvedUrl.isBlank()) return null
                 MediaItem(
                     title = track.title,
@@ -526,7 +588,7 @@ class DeviceAudioPlayerQueue(
                     duration = track.durationMs.milliseconds,
                     coverURL = artworkUrl.orEmpty(),
                     url = resolvedUrl,
-                    protocol = protocol)
+                    protocol = resolvedStream?.protocol ?: protocol)
             }
 
             is QueueEntry.LocalTrack -> {
