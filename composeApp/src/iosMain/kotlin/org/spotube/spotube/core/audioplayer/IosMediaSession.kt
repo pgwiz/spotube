@@ -23,7 +23,6 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import platform.AVFAudio.AVAudioSession
 import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.AVAudioSessionModeDefault
-import platform.AVFAudio.AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSOperationQueue
 import platform.MediaPlayer.MPChangePlaybackPositionCommandEvent
@@ -85,19 +84,11 @@ internal class IosMediaSession {
     }
 
     fun activate() {
-        runCatching {
-            audioSession.setActive(active = true, withOptions = 0u, error = null)
-        }
+        // AVPlayer automatically activates the shared audio session on play.
     }
 
     fun deactivate() {
-        runCatching {
-            audioSession.setActive(
-                active = false,
-                withOptions = AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation,
-                error = null
-            )
-        }
+        // AVPlayer automatically manages session deactivation when paused or stopped.
     }
 
     fun update(
