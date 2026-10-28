@@ -44,11 +44,18 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
+
       - name: Publish compose-webview to mavenLocal
         working-directory: compose-webview
         run: |
           chmod +x gradlew
-          ./gradlew publishToMavenLocal
+          mkdir -p src/jvmMain/resources/nucleus/native/linux-x64
+          touch src/jvmMain/resources/nucleus/native/linux-x64/libcompose_webview_linux.so
+          ./gradlew publishToMavenLocal -x :webview-compose:buildNativeLinux -x :webview-compose:verifyPublicationCoordinates --no-daemon
 
       - name: Configure Android signing
         working-directory: composeApp
@@ -62,20 +69,20 @@ jobs:
           if [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > "${{ github.workspace }}/composeApp/upload-keystore.jks"
             cat >> local.properties <<EOF
-          release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
-          release.signing.storePassword=${KEYSTORE_PASSWORD}
-          release.signing.keyAlias=${KEYSTORE_KEY_ALIAS}
-          release.signing.keyPassword=${KEYSTORE_KEY_PASSWORD}
-          EOF
+release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
+release.signing.storePassword=${KEYSTORE_PASSWORD}
+release.signing.keyAlias=${KEYSTORE_KEY_ALIAS}
+release.signing.keyPassword=${KEYSTORE_KEY_PASSWORD}
+EOF
           else
             echo "No custom keystore secret found, generating build keystore..."
             keytool -genkey -v -keystore "${{ github.workspace }}/composeApp/upload-keystore.jks" -alias spotube -keyalg RSA -keysize 2048 -validity 10000 -storepass spotubepass -keypass spotubepass -dname "CN=Spotube, OU=Mobile, O=Spotube, C=US"
             cat >> local.properties <<EOF
-          release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
-          release.signing.storePassword=spotubepass
-          release.signing.keyAlias=spotube
-          release.signing.keyPassword=spotubepass
-          EOF
+release.signing.storeFile=${{ github.workspace }}/composeApp/upload-keystore.jks
+release.signing.storePassword=spotubepass
+release.signing.keyAlias=spotube
+release.signing.keyPassword=spotubepass
+EOF
           fi
 
       - name: Assemble Android Release APK
