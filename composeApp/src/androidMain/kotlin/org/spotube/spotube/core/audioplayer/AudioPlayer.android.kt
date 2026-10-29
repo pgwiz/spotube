@@ -127,6 +127,7 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                Log.e("AudioPlayer", "ExoPlayer error: ${error.errorCodeName} (${error.errorCode}): ${error.message}", error)
                 _error.tryEmit(error)
             }
 

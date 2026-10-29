@@ -104,6 +104,12 @@ class DeviceAudioPlayerQueue(
         }
 
         scope.launch {
+            audioPlayer.errorFlow.collect { error ->
+                logger.e(error) { "AudioPlayer error encountered in queue: ${error.message}" }
+            }
+        }
+
+        scope.launch {
             audioPlayer.currentMediaItemFlow.collect {
                 logger.d { "Current media item changed, persisting queue state" }
                 persistQueueStateIfReady()
