@@ -429,7 +429,7 @@ internal class StreamProxy(
         if (requestMethod == HttpMethod.Head) {
             call.respond(object : OutgoingContent.NoContent() {
                 override val status: HttpStatusCode = upstream.status
-                override val headers: Headers = downstreamHeaders
+                override val headers: Headers = downstreamHeaders.passthroughForPlayer()
                 override val contentLength: Long? = downstreamContentLength
             })
             return
@@ -450,7 +450,7 @@ internal class StreamProxy(
 
         call.respond(object : OutgoingContent.WriteChannelContent() {
             override val status: HttpStatusCode = upstream.status
-            override val headers: Headers = downstreamHeaders
+            override val headers: Headers = downstreamHeaders.passthroughForPlayer()
             override val contentLength: Long? = downstreamContentLength
             override val contentType: ContentType? =
                 downstreamHeaders[HttpHeaders.ContentType]?.let(ContentType.Companion::parse)
@@ -662,4 +662,28 @@ internal class StreamProxy(
             }
         }.build()
     }
+
+}
+
+private val PLAYER_PASSTHROUGH_HEADERS = listOf(
+    HttpHeaders.ContentRange,
+    HttpHeaders.AcceptRanges,
+    HttpHeaders.ETag,
+    HttpHeaders.LastModified,
+)
+
+/**
+ * The upstream headers a player actually needs. Copying them all makes Ktor emit duplicate
+ * Content-Length/Content-Type (also set through the OutgoingContent) and forwards hop-by-hop
+ * headers like `Connection: keep-alive`, which VLC rejects by closing the socket right after
+ * the response headers. Content-Range and Accept-Ranges must stay: without them the player
+ * treats a 206 as invalid and the stream as unseekable, and e.g. WebM can't be demuxed.
+ */
+internal fun Headers.passthroughForPlayer(): Headers {
+    val upstream = this
+    return HeadersBuilder().apply {
+        PLAYER_PASSTHROUGH_HEADERS.forEach { name ->
+            upstream.getAll(name)?.forEach { value -> append(name, value) }
+        }
+    }.build()
 }

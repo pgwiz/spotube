@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
+import org.spotube.spotube.core.DebugConfig
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
 import uk.co.caprica.vlcj.medialist.MediaList
@@ -87,11 +88,13 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
     private val _error = MutableSharedFlow<Throwable>(extraBufferCapacity = 1)
 
     actual override val playerStateFlow: StateFlow<PlayerState> = _playerState.asStateFlow()
-    actual override val currentMediaItemFlow: StateFlow<MediaItem?> = _currentMediaItem.asStateFlow()
+    actual override val currentMediaItemFlow: StateFlow<MediaItem?> =
+        _currentMediaItem.asStateFlow()
     actual override val playlistFlow: StateFlow<List<MediaItem>> = _playlist.asStateFlow()
     actual override val durationFlow: StateFlow<Duration> = _duration.asStateFlow()
     actual override val positionFlow: StateFlow<Duration> = _position.asStateFlow()
-    actual override val bufferingPositionFlow: StateFlow<Duration> = _bufferingPosition.asStateFlow()
+    actual override val bufferingPositionFlow: StateFlow<Duration> =
+        _bufferingPosition.asStateFlow()
     actual override val loopStateFlow: StateFlow<LoopState> = _loopState.asStateFlow()
     actual override val shuffleModeFlow: StateFlow<Boolean> = _shuffleMode.asStateFlow()
     actual override val playbackSpeedFlow: StateFlow<Float> = _playbackSpeed.asStateFlow()
@@ -101,6 +104,7 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
 
     init {
         VLCBundleLoaderGenerated.getVerifiedPath()
+        val vlcLogArgs = if (DebugConfig.FORCE_VLC_LOGS) arrayOf("--verbose=2") else emptyArray()
         mediaPlayerFactory = MediaPlayerFactory(
             null as NativeDiscovery?,
             "--no-video",
@@ -108,8 +112,7 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
             "--aout=any",
             "--no-osd",
             "--no-snapshot-preview",
-//            "--verbose=2"
-//            "--quiet"
+            *vlcLogArgs
         )
         audioListPlayerComponent = object : AudioListPlayerComponent(mediaPlayerFactory) {
             override fun opening(mediaPlayer: MediaPlayer) {
@@ -122,7 +125,8 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
             ) {
                 val durationMs = mediaPlayer.status().length()
                 _bufferingPosition.tryEmit(
-                    if (durationMs > 0) (durationMs * (newCache / 100f)).toLong().milliseconds else Duration.ZERO)
+                    if (durationMs > 0) (durationMs * (newCache / 100f)).toLong().milliseconds else Duration.ZERO
+                )
                 _playerState.tryEmit(if (newCache < 100f) PlayerState.BUFFERING else PlayerState.READY)
             }
 
@@ -184,7 +188,8 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
 
             override fun nextItem(
                 mediaListPlayer: uk.co.caprica.vlcj.player.list.MediaListPlayer,
-                item: uk.co.caprica.vlcj.media.MediaRef) {
+                item: uk.co.caprica.vlcj.media.MediaRef
+            ) {
                 lock.withLock {
                     val targetIndex = pendingNextIndex ?: run {
                         val currentMrl = runCatching {
@@ -336,7 +341,11 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
         }
     }
 
-    actual override suspend fun load(playlist: List<MediaItem>, autoPlay: Boolean, startPosition: Int) {
+    actual override suspend fun load(
+        playlist: List<MediaItem>,
+        autoPlay: Boolean,
+        startPosition: Int
+    ) {
         lock.withLock {
             if (disposed) return
 

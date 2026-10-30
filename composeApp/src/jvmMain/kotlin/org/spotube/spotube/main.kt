@@ -132,6 +132,15 @@ private fun restoreWindowState(saved: PersistedWindowState?): PersistedWindowSta
     return PersistedWindowState.of(size, saved.placement)
 }
 
+/** Runs [block] on a fresh thread and waits for it, rethrowing whatever it threw. */
+private fun runOnWorkerThread(name: String, block: () -> Unit) {
+    var failure: Throwable? = null
+    val thread = Thread({ runCatching(block).onFailure { failure = it } }, name)
+    thread.start()
+    thread.join()
+    failure?.let { throw it }
+}
+
 @OptIn(ExperimentalComposeUiApi::class, FlowPreview::class)
 fun main() {
     // Sets compose.application.resources.dir in the native image. initKoin() creates the audio
@@ -140,8 +149,19 @@ fun main() {
     GraalVmInitializer.initialize()
     AppImageEnvironment.apply()
     FileKit.init(appId = "org.spotube.spotube")
-    initKoin()
-    NewPipeDownloader.init(KoinPathsProvider.paths)
+    val initApp = {
+        initKoin()
+        NewPipeDownloader.init(KoinPathsProvider.paths)
+    }
+    // libvlc and the system media controls initialize COM as multithreaded on the calling thread. In the
+    // native image the main thread also creates the Tao window, whose OleInitialize needs a single-threaded
+    // apartment and panics with RPC_E_CHANGED_MODE, so on Windows Koin's eager singletons are created
+    // elsewhere. COM doesn't exist on macOS/Linux, where this stays on the main thread as before.
+    if (getPlatform().type == PlatformType.Windows) {
+        runOnWorkerThread("spotube-init", initApp)
+    } else {
+        initApp()
+    }
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     nucleusApplication(backend = NucleusBackend.Tao) {

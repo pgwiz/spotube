@@ -80,7 +80,8 @@ class StreamingUrlRepository(
     private val audioPlayerQueue: AudioPlayerQueue,
     private val matchedTracksRepository: TrackSourceRepository,
     private val settingsRepository: UserSettingsSource,
-    private val streamUrlCacheTtlMs: Long = 30.seconds.inWholeMilliseconds) : KoinComponent {
+    private val streamUrlCacheTtlMs: Long = 30.seconds.inWholeMilliseconds,
+    private val platform: PlatformType = currentPlatform) : KoinComponent {
 
     private val logger by injectLogger<StreamingUrlRepository>()
     private val streamUrlCacheMutex = Mutex()
@@ -145,7 +146,7 @@ class StreamingUrlRepository(
             } else {
                 stream.streams
             }
-            return selectPreferredAudioStream(candidates, preferredFormat, preferredQuality)
+            return selectPreferredAudioStream(candidates, preferredFormat, preferredQuality, platform)
                 .also { logSelection(trackId, origin, candidates, preferredFormat, preferredQuality, it) }
         }
 
@@ -260,7 +261,7 @@ class StreamingUrlRepository(
                 "lowest wins):\n" +
                 streams.joinToString("\n") { stream ->
                     val marker = if (stream === selected) "  -> " else "     "
-                    "$marker${stream.describeForLog()} key=(${if (stream.isPlayableOn(currentPlatform)) 0 else 1}, " +
+                    "$marker${stream.describeForLog()} key=(${if (stream.isPlayableOn(platform)) 0 else 1}, " +
                         "${formatMismatchCount(stream, preferredFormat)}, " +
                         "${if (stream.matchesQualityType(preferredQuality)) 0 else 1}, " +
                         "${stream.qualityDistance(preferredQuality).let { if (it == Long.MAX_VALUE) "inf" else "$it" }}, " +
@@ -269,8 +270,8 @@ class StreamingUrlRepository(
         }
         when {
             selected == null -> logger.w { "[Resolve $trackId] no stream selected" }
-            !selected.isPlayableOn(currentPlatform) -> logger.w {
-                "[Resolve $trackId] NO PLAYABLE STREAM on $currentPlatform; falling back to " +
+            !selected.isPlayableOn(platform) -> logger.w {
+                "[Resolve $trackId] NO PLAYABLE STREAM on $platform; falling back to " +
                     "${selected.describeForLog()}, which the player will likely reject"
             }
             formatMismatchCount(selected, preferredFormat) > 0 -> logger.w {
@@ -425,12 +426,16 @@ internal fun selectPreferredAudioStream(
     }
 )
 
-// AVPlayer has no WebM/Ogg/Matroska demuxer, so e.g. YouTube's opus/webm streams fail to load.
-private val IOS_UNSUPPORTED_CONTAINERS = setOf("webm", "ogg", "oga", "mkv", "matroska")
+private val MATROSKA_CONTAINERS = setOf("webm", "mkv", "matroska")
+
+// Containers a platform's player can't open, so e.g. YouTube's opus/webm streams fail to load there.
+private val UNSUPPORTED_CONTAINERS: Map<PlatformType, Set<String>> = mapOf(
+    // AVPlayer has no WebM/Ogg/Matroska demuxer.
+    PlatformType.IOS to MATROSKA_CONTAINERS + setOf("ogg", "oga"))
 
 /**
- * Whether [platform]'s player can play this stream. VLC (desktop) and ExoPlayer (Android)
- * handle everything plugins return; AVPlayer (iOS) can't demux WebM/Ogg and can't play DASH.
+ * Whether [platform]'s player can play this stream. ExoPlayer (Android) and VLC elsewhere handle
+ * everything plugins return; AVPlayer (iOS) can't demux WebM/Ogg and can't play DASH.
  */
 internal fun AudioStream.isPlayableOn(platform: PlatformType): Boolean =
     isContainerPlayableOn(container, platform) &&
@@ -438,7 +443,7 @@ internal fun AudioStream.isPlayableOn(platform: PlatformType): Boolean =
 
 /** Whether [platform]'s player can open [container] at all; see [AudioStream.isPlayableOn]. */
 internal fun isContainerPlayableOn(container: String, platform: PlatformType): Boolean =
-    platform != PlatformType.IOS || container.lowercase() !in IOS_UNSUPPORTED_CONTAINERS
+    container.lowercase() !in UNSUPPORTED_CONTAINERS[platform].orEmpty()
 
 private fun formatMismatchCount(stream: AudioStream, preferredFormat: AudioFormat): Int =
     (if (stream.codec.equals(preferredFormat.codec, ignoreCase = true)) 0 else 1) +

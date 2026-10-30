@@ -108,14 +108,14 @@ data class JamBroker(
     val connectionTimeoutSeconds: Int = 10)
 
 /**
- * opus/webm everywhere except iOS, whose AVPlayer can't open WebM/Ogg, so it streams AAC.
+ * opus/webm wherever the platform's player can open WebM; iOS (AVPlayer) can't, so it streams AAC.
  * TODO: revisit once iOS can play Opus (e.g. remuxing to CAF or a non-AVPlayer backend).
  */
 internal fun defaultStreamingMusicFormat(platform: PlatformType = currentPlatform): AudioFormat {
-    val ios = platform == PlatformType.IOS
+    val aac = !isContainerPlayableOn("webm", platform)
     return AudioFormat(
-        codec = if (ios) "aac" else "opus",
-        container = if (ios) "mp4" else "webm",
+        codec = if (aac) "aac" else "opus",
+        container = if (aac) "mp4" else "webm",
         qualities = listOf(
             AudioQuality.Lossy(bitrate = 44_000),
             AudioQuality.Lossy(bitrate = 96_000),

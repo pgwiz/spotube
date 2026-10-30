@@ -44,11 +44,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import org.spotube.spotube.core.ui.theming.AppTheme
+import org.spotube.spotube.core.ui.theming.isLightAppearance
 import org.spotube.spotube.modules.settings.SettingsViewModel
 import org.spotube.spotube.modules.settings.Theme
 import org.spotube.spotube.modules.settings.UserSettings
@@ -206,7 +206,8 @@ private fun PaletteSwatch(
     label: String,
     selected: Boolean,
     onClick: () -> Unit) {
-    val scheme = remember(palette) { MillenniumColorSchemes().resolve(palette, dark = false) }
+    val dark = !isLightAppearance()
+    val scheme = remember(palette, dark) { MillenniumColorSchemes().resolve(palette, dark = dark) }
     Box(
         modifier = Modifier
             .size(40.dp)
@@ -222,7 +223,8 @@ private fun PaletteSwatch(
 
 @Composable
 private fun PaletteTrailingSwatch(palette: MillenniumPalette) {
-    val scheme = remember(palette) { MillenniumColorSchemes().resolve(palette, dark = false) }
+    val dark = !isLightAppearance()
+    val scheme = remember(palette, dark) { MillenniumColorSchemes().resolve(palette, dark = dark) }
     Row(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically) {
@@ -241,7 +243,7 @@ private fun PaletteTrailingSwatch(palette: MillenniumPalette) {
 
 @Composable
 private fun PalettePreview(palette: MillenniumPalette) {
-    val dark = AppTheme.colors.background.luminance() < 0.5f
+    val dark = !isLightAppearance()
     MillenniumTheme(dark = dark, config = MillenniumThemeConfig(palette = palette)) {
         Column(
             modifier = Modifier

@@ -12,52 +12,19 @@ on:
           - stable
           - beta
           - nightly
-      target_preset:
-        description: 'Target preset'
+      platform:
+        description: 'Platform to build'
         required: true
         type: choice
         default: 'all'
         options:
           - all
-          - desktop
-          - desktop-no-mac
-          - mobile
-          - windows
-          - linux
-          - macos
           - android
+          - linux-x86_64
+          - linux-aarch64
+          - windows
+          - macos
           - ios
-          - custom
-      build_windows:
-        description: '  -> Windows x86_64 (.exe) (if custom)'
-        required: false
-        type: boolean
-        default: true
-      build_linux:
-        description: '  -> Linux x86_64 (.deb, .rpm, .AppImage, .tar.xz) (if custom)'
-        required: false
-        type: boolean
-        default: true
-      build_linux_arm64:
-        description: '  -> Linux ARM64 (.deb, .rpm, .AppImage, .tar.xz) (if custom)'
-        required: false
-        type: boolean
-        default: true
-      build_macos:
-        description: '  -> macOS Universal (.dmg) (if custom)'
-        required: false
-        type: boolean
-        default: true
-      build_android:
-        description: '  -> Android (.apk) (if custom)'
-        required: false
-        type: boolean
-        default: true
-      build_ios:
-        description: '  -> iOS (.ipa) (if custom)'
-        required: false
-        type: boolean
-        default: true
       dry_run:
         description: 'Dry run (build & upload artifacts only, skip creating release)'
         required: false
@@ -74,16 +41,94 @@ permissions:
 
 # Never cancel a running release when another is dispatched, and let stable, beta and nightly run side by side
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_type }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_type }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 env:
   COMPOSE_WEBVIEW_REPO: KRTirtho/ComposeNativeWebview
-  COMPOSE_WEBVIEW_COMMIT: cbd36f88927298a28a2d64c6acf7ec3b2def6f9d
+  # fix/linux-wayland-input
+  COMPOSE_WEBVIEW_COMMIT: b11ac748de1219f9432338c067a2c5dafef3072a
 
 jobs:
+  validate-inputs:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Single platform builds are nightly only
+        if: ${{ inputs.platform != 'all' && inputs.release_type != 'nightly' }}
+        run: |
+          echo "::error::Building a single platform is only supported for nightly releases"
+          exit 1
+
+  # ComposeNativeWebview's JNI backends are gitignored and only built for the host OS, so a
+  # publish from macOS alone ships a jar without the Linux / Windows WebView libraries (the
+  # WebView then renders nothing). Build them on their own OS and hand them to prepare-deps.
+  build-webview-natives:
+    name: WebView Natives (${{ matrix.name }})
+    needs: validate-inputs
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: windows-x64
+            os: windows-latest
+    steps:
+      - name: Checkout ComposeNativeWebview
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.COMPOSE_WEBVIEW_REPO }}
+          ref: ${{ env.COMPOSE_WEBVIEW_COMMIT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: compose-webview
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build Linux WebView native library
+        if: runner.os == 'Linux'
+        working-directory: compose-webview
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libcairo2-dev \
+            libsoup-3.0-dev libwebkit2gtk-4.1-dev
+          bash webview-compose/src/jvmMain/native/linux/build.sh
+
+      - name: Build Windows WebView native library
+        if: runner.os == 'Windows'
+        working-directory: compose-webview
+        shell: cmd
+        run: webview-compose\src\jvmMain\native\windows\build.bat
+
+      - name: Verify WebView native library
+        working-directory: compose-webview
+        shell: bash
+        run: |
+          case "${{ matrix.name }}" in
+            linux-*)     files="${{ matrix.name }}/libcompose_webview_linux.so" ;;
+            windows-x64) files="win32-x64/compose_webview_windows.dll win32-x64/WebView2Loader.dll" ;;
+          esac
+          for f in $files; do
+            test -f "webview-compose/src/jvmMain/resources/nucleus/native/$f" || { echo "::error::Missing $f"; exit 1; }
+          done
+
+      - name: Upload WebView native library
+        uses: actions/upload-artifact@v7
+        with:
+          name: webview-natives-${{ matrix.name }}
+          path: compose-webview/webview-compose/src/jvmMain/resources/nucleus/native/
+          retention-days: 1
+
   prepare-deps:
     name: Prepare Dependencies
+    needs: [validate-inputs, build-webview-natives]
     runs-on: macos-latest
     steps:
       - name: Checkout ComposeNativeWebview
@@ -93,6 +138,15 @@ jobs:
           ref: ${{ env.COMPOSE_WEBVIEW_COMMIT }}
           token: ${{ secrets.GITHUB_TOKEN }}
           path: compose-webview
+
+      # Downloaded after checkout, so they are newer than the native sources and
+      # the build keeps them instead of trying to rebuild on the wrong OS.
+      - name: Download WebView native libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: webview-natives-*
+          merge-multiple: true
+          path: compose-webview/webview-compose/src/jvmMain/resources/nucleus/native
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6
@@ -115,6 +169,16 @@ jobs:
           chmod +x gradlew
           ./gradlew publishToMavenLocal
 
+      - name: Verify published JVM jar carries every WebView backend
+        run: |
+          jar=$(ls ~/.m2/repository/dev/nucleusframework/composewebview-jvm/*/composewebview-jvm-*.jar | grep -v -e sources -e javadoc | head -1)
+          contents=$(unzip -l "$jar")
+          for f in linux-x64/libcompose_webview_linux.so linux-aarch64/libcompose_webview_linux.so \
+                   win32-x64/compose_webview_windows.dll win32-x64/WebView2Loader.dll \
+                   darwin-aarch64/libcompose_webview_macos.dylib darwin-x64/libcompose_webview_macos.dylib; do
+            grep -q "nucleus/native/$f" <<< "$contents" || { echo "::error::$jar is missing $f"; exit 1; }
+          done
+
       - name: Upload maven local
         uses: actions/upload-artifact@v7
         with:
@@ -123,8 +187,8 @@ jobs:
 
   build-android:
     name: Android
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'mobile' || inputs.target_preset == 'android' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_android) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'android' }}
     timeout-minutes: 120
     runs-on: ubuntu-latest
     steps:
@@ -201,8 +265,8 @@ jobs:
 
   build-linux:
     name: Linux Desktop
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'linux' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_linux) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux-x86_64' }}
     timeout-minutes: 120
     runs-on: ubuntu-latest
     steps:
@@ -211,16 +275,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fuse build-essential zlib1g-dev patchelf zstd
+
       - name: Download maven local
         uses: actions/download-artifact@v8
         with:
           name: maven-local
           path: ~/.m2/repository/
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm fuse build-essential zlib1g-dev patchelf zstd
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6
@@ -315,8 +379,8 @@ jobs:
 
   build-linux-arm64:
     name: Linux Desktop (aarch64)
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'linux' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_linux_arm64) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'linux-aarch64' }}
     timeout-minutes: 120
     runs-on: ubuntu-24.04-arm
     steps:
@@ -332,16 +396,16 @@ jobs:
         with:
           packages: tools platform-tools ndk;28.2.13676358
 
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm fuse build-essential zlib1g-dev patchelf zstd
+
       - name: Download maven local
         uses: actions/download-artifact@v8
         with:
           name: maven-local
           path: ~/.m2/repository/
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm fuse build-essential zlib1g-dev patchelf zstd
 
       - name: Set up JDK 21
         uses: actions/setup-java@v6
@@ -436,8 +500,8 @@ jobs:
 
   build-windows:
     name: Windows Desktop
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'desktop-no-mac' || inputs.target_preset == 'windows' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_windows) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'windows' }}
     timeout-minutes: 120
     runs-on: windows-latest
     steps:
@@ -500,8 +564,8 @@ jobs:
 
   build-macos:
     name: macOS Desktop
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'desktop' || inputs.target_preset == 'macos' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_macos) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'macos' }}
     timeout-minutes: 120
     runs-on: macos-latest
     steps:
@@ -569,8 +633,8 @@ jobs:
 
   build-ios:
     name: iOS
-    if: ${{ inputs.target_preset == 'all' || inputs.target_preset == 'mobile' || inputs.target_preset == 'ios' || inputs.target_preset == '' || (inputs.target_preset == 'custom' && inputs.build_ios) }}
-    needs: prepare-deps
+    needs: [validate-inputs, prepare-deps]
+    if: ${{ inputs.platform == 'all' || inputs.platform == 'ios' }}
     timeout-minutes: 120
     runs-on: macos-latest
     steps:
@@ -639,8 +703,10 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    if: ${{ !inputs.dry_run && !cancelled() && always() }}
+    # Skipped platform jobs count as skipped, not failed, so a single platform build still releases
+    if: ${{ !inputs.dry_run && !cancelled() && !contains(needs.*.result, 'failure') }}
     needs:
+      - validate-inputs
       - prepare-deps
       - build-android
       - build-linux
@@ -654,7 +720,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The build resolves its plugins from mavenLocal, so Gradle needs the same setup as the build jobs
       - name: Download maven local
         uses: actions/download-artifact@v8
         with:
@@ -707,7 +772,7 @@ jobs:
           fi
 
       - name: Generate release notes
-        if: steps.check_artifacts.outputs.has_artifacts == 'true'
+        if: steps.check_artifacts.outputs.has_artifacts == 'true' && inputs.platform == 'all'
         run: |
           echo "## Downloads" > release-notes.md
           echo "" >> release-notes.md
@@ -726,9 +791,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
+          # A new tag (stable) would otherwise point at the default branch instead of the built commit
+          target_commitish: ${{ github.sha }}
+          # A single platform build only has its own artifacts
           fail_on_unmatched_files: false
-          name: ${{ steps.vars.outputs.release_name }}
-          body_path: release-notes.md
+          # A single platform build only replaces that platform's assets (same file names are overwritten),
+          # so leave the existing release's name and notes alone
+          name: ${{ (inputs.platform == 'all' || steps.vars.outputs.release_name != '') && steps.vars.outputs.release_name || '' }}
+          body_path: ${{ inputs.platform == 'all' && 'release-notes.md' || '' }}
           draft: ${{ steps.vars.outputs.is_draft }}
           prerelease: ${{ steps.vars.outputs.is_prerelease }}
           files: |

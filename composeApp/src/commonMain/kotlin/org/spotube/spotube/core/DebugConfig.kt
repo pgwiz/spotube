@@ -39,4 +39,6 @@ object DebugConfig {
      * Keep it `false` when committing.
      */
     const val FORCE_SUPPORT_REMINDER: Boolean = false
+
+    const val FORCE_VLC_LOGS: Boolean = false
 }

@@ -17,7 +17,6 @@
 
 package org.spotube.spotube.core.ui.theming
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -205,7 +204,7 @@ fun SpotubeTheme(
     val isDarkTheme = when (settings.theme) {
         Theme.LIGHT -> false
         Theme.DARK -> true
-        Theme.SYSTEM -> isSystemInDarkTheme()
+        Theme.SYSTEM -> isSystemDarkTheme()
     }
     val palette: MillenniumPalette = settings.palette
 

@@ -35,8 +35,10 @@ class StreamingFormatDefaultsTest {
 
     @Test
     fun `other platforms keep opus in webm`() {
-        val format = defaultStreamingMusicFormat(PlatformType.Android)
-        assertEquals("opus" to "webm", format.codec to format.container)
+        listOf(PlatformType.Android, PlatformType.Linux, PlatformType.MacOS, PlatformType.Windows).forEach { platform ->
+            val format = defaultStreamingMusicFormat(platform)
+            assertEquals("opus" to "webm", format.codec to format.container, platform.name)
+        }
     }
 
     @Test
