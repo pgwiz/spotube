@@ -24,6 +24,7 @@ import org.spotube.plugin_interfaces.plugin_apis.metadata.track.MetadataTrack
 import org.spotube.spotube.core.di.injectLogger
 import org.spotube.spotube.core.newpipe.NewPipeService
 import org.spotube.spotube.core.newpipe.SearchKind
+import org.spotube.spotube.core.server.LocalServer
 import org.spotube.spotube.modules.blacklist.BlacklistRepository
 import org.spotube.spotube.modules.plugin.PluginProvider
 import org.spotube.spotube.modules.settings.SettingsProvider
@@ -620,10 +621,15 @@ class DeviceAudioPlayerQueue(
             url = url)
     }
 
+    private val localServerOrNull: LocalServer?
+        get() = runCatching { getKoin().getOrNull<LocalServer>() }.getOrNull()
+
     private suspend fun buildStreamingUrl(trackId: String, protocol: StreamProtocol): String {
-        val port: Int =
-            settingsProvider.settingsState.mapNotNull { it?.playbackProxyServerPort }.first()
-        val baseUrl = "http://127.0.0.1:$port"
+        val baseUrl = localServerOrNull?.awaitBaseUrl() ?: run {
+            val port: Int =
+                settingsProvider.settingsState.mapNotNull { it?.playbackProxyServerPort }.first()
+            "http://127.0.0.1:$port"
+        }
         return when (protocol) {
             StreamProtocol.HLS, StreamProtocol.DASH -> "${baseUrl.trimEnd('/')}/manifest/$trackId"
             StreamProtocol.PROGRESSIVE -> "${baseUrl.trimEnd('/')}/stream/$trackId"
