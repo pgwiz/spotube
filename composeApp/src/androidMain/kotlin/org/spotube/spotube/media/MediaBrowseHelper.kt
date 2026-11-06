@@ -66,7 +66,8 @@ class MediaBrowseHelper(
     private val collectionPlaybackHelper: CollectionPlaybackHelper,
     private val audioPlayerQueue: AudioPlayerQueue,
     private val settingsRepository: SettingsRepository,
-    private val blacklistRepository: BlacklistRepository) {
+    private val blacklistRepository: BlacklistRepository,
+    private val localServer: LocalServer? = null) {
 
     companion object {
         const val MEDIA_ID_ROOT = "root"

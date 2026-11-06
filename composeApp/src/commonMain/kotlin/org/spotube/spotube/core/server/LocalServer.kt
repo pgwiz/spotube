@@ -91,18 +91,18 @@ class LocalServer(
 
     val baseUrl = activePort.map { port ->
         port?.let { "http://$HOST_LOCAL:$it" }
-    }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
+    }.stateIn(scope, SharingStarted.Eagerly, null)
 
-    suspend fun awaitPort(timeout: Duration = 3.seconds): Int {
+    suspend fun awaitPort(timeout: Duration = 1.seconds): Int? {
         val current = activePort.value
         if (current != null) return current
         return withTimeoutOrNull(timeout) {
             activePort.filterNotNull().first()
-        } ?: settingsViewModel.settingsState.value?.playbackProxyServerPort ?: 14769
+        }
     }
 
-    suspend fun awaitBaseUrl(timeout: Duration = 3.seconds): String {
-        val port = awaitPort(timeout)
+    suspend fun awaitBaseUrl(timeout: Duration = 1.seconds): String? {
+        val port = awaitPort(timeout) ?: return null
         return "http://$HOST_LOCAL:$port"
     }
 

@@ -59,6 +59,7 @@ class DeviceAudioPlayerQueue(
 
     private val logger by injectLogger<DeviceAudioPlayerQueue>()
     private val streamingUrlRepository by inject<StreamingUrlRepository>()
+    private val newPipeService by inject<NewPipeService>()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -114,6 +115,19 @@ class DeviceAudioPlayerQueue(
             audioPlayer.currentMediaItemFlow.collect {
                 logger.d { "Current media item changed, persisting queue state" }
                 persistQueueStateIfReady()
+                lastPrefetchedTrackId = null
+            }
+        }
+
+        scope.launch {
+            combine(
+                audioPlayer.currentMediaItemFlow,
+                audioPlayer.positionFlow,
+                audioPlayer.durationFlow
+            ) { currentMedia, position, duration ->
+                Triple(currentMedia, position, duration)
+            }.collect { (currentMedia, position, duration) ->
+                checkAndPrefetchNextTrack(currentMedia, position, duration)
             }
         }
 
@@ -345,23 +359,24 @@ class DeviceAudioPlayerQueue(
         val seedTrackIds = seedTracks.map { it.track.id }
         if (seedTrackIds.isEmpty()) return
 
+        val validMetadataSeedIds = seedTrackIds.filter { !it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }
+
         isFetchingRecommendations = true
-        logger.i { "Endless playback: fetching recommendations with ${seedTrackIds.size} seed tracks" }
+        logger.i { "Endless playback: fetching recommendations with ${seedTrackIds.size} seed tracks (${validMetadataSeedIds.size} metadata valid)" }
 
         val metadataService = pluginProvider.selectedMetadataPlugin.value
         var recommendations: List<MetadataTrack> = emptyList()
 
-        if (metadataService != null) {
-            recommendations = runCatching {
+        if (metadataService != null && validMetadataSeedIds.isNotEmpty()) {
+            recommendations = runCatchingNonCancellation {
                 metadataService.use {
-                    metadataTrackAPI.recommendationsBasedOnTracks(seedTrackIds, limit = 20)
+                    metadataTrackAPI.recommendationsBasedOnTracks(validMetadataSeedIds, limit = 20)
                 }
             }.getOrDefault(emptyList())
         }
 
         if (recommendations.isEmpty()) {
             logger.i { "Endless playback: metadata recommendations unavailable or empty, falling back to native YouTube radio mix" }
-            val newPipeService = NewPipeService()
             for (seedTrack in seedTracks) {
                 val seed = seedTrack.track
                 val videoId = if (seed.id.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
@@ -375,7 +390,7 @@ class DeviceAudioPlayerQueue(
                 }
 
                 if (!videoId.isNullOrBlank()) {
-                    val radioMix = runCatching { newPipeService.getRadioMix(videoId) }.getOrDefault(emptyList())
+                    val radioMix = runCatchingNonCancellation { newPipeService.getRadioMix(videoId) }.getOrDefault(emptyList())
                     val existingTrackIds = queue.filterIsInstance<QueueEntry.StreamingTrack>().map { it.track.id }.toSet()
                     val newRadioTracks = radioMix.filter { it.id !in existingTrackIds && it.id != videoId }
                     if (newRadioTracks.isNotEmpty()) {
@@ -433,7 +448,7 @@ class DeviceAudioPlayerQueue(
         if (recommendations.isEmpty() && metadataService != null) {
             logger.i { "Endless playback: album tracks unavailable or empty, falling back to artist top tracks" }
             val existingTrackIds = queue.filterIsInstance<QueueEntry.StreamingTrack>().map { it.track.id }.toSet()
-            val artistIds = seedTracks.flatMap { it.track.artists }.map { it.id }.filter { it.isNotBlank() }.distinct()
+            val artistIds = seedTracks.flatMap { it.track.artists }.map { it.id }.filter { it.isNotBlank() && !it.contains(" ") && !it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }.distinct()
             for (artistId in artistIds) {
                 val topTracks = runCatching {
                     metadataService.use {
@@ -564,28 +579,55 @@ class DeviceAudioPlayerQueue(
         }
     }
 
+    private var lastPrefetchedTrackId: String? = null
+
+    private fun checkAndPrefetchNextTrack(
+        currentMedia: MediaItem?,
+        position: kotlin.time.Duration,
+        duration: kotlin.time.Duration
+    ) {
+        if (currentMedia == null || duration <= kotlin.time.Duration.ZERO || duration.inWholeSeconds < 5) return
+
+        val progress = position.inWholeMilliseconds.toDouble() / duration.inWholeMilliseconds.toDouble()
+        val remainingSec = (duration - position).inWholeSeconds
+        if (progress < 0.70 && remainingSec > 30) return
+
+        val playlist = audioPlayer.playlistFlow.value
+        if (playlist.isEmpty()) return
+
+        val currentIndex = playlist.indexOfFirst { it.url == currentMedia.url }
+        if (currentIndex < 0) return
+
+        val loopState = audioPlayer.loopStateFlow.value
+        val nextIndex = when {
+            currentIndex < playlist.size - 1 -> currentIndex + 1
+            loopState == LoopState.ALL && playlist.size > 1 -> 0
+            else -> -1
+        }
+        if (nextIndex < 0) return
+
+        val nextMedia = playlist[nextIndex]
+        val nextEntry = entryByMediaUrl.value[nextMedia.url] ?: queueFlow.value.getOrNull(nextIndex)
+        if (nextEntry !is QueueEntry.StreamingTrack) return
+
+        val nextTrack = nextEntry.track
+        if (lastPrefetchedTrackId == nextTrack.id) return
+
+        lastPrefetchedTrackId = nextTrack.id
+        scope.launch {
+            logger.i { "Prefetching stream info for upcoming track: '${nextTrack.title}' (${nextTrack.id})" }
+            runCatchingNonCancellation {
+                streamingUrlRepository.resolveStreamInfo(nextTrack)
+            }.onFailure { e ->
+                logger.d { "Prefetch skipped or failed for track ${nextTrack.id}: ${e.message}" }
+            }
+        }
+    }
+
     private suspend fun QueueEntry.toMediaItem(): MediaItem? {
         return when (this) {
             is QueueEntry.StreamingTrack -> {
-                val isIos = getPlatform().type == PlatformType.IOS
-                val requiresIosResolution = isIos && (
-                    url.isBlank() ||
-                        url.startsWith("http://127.0.0.1") ||
-                        url.startsWith("https://127.0.0.1") ||
-                        url.startsWith("http://[::1]") ||
-                        url.startsWith("https://[::1]") ||
-                        url.startsWith("http://localhost") ||
-                        url.startsWith("https://localhost"))
-                val resolvedStream = if (requiresIosResolution) {
-                    streamingUrlRepository.resolveStreamInfo(track)
-                } else {
-                    null
-                }
-                val resolvedUrl = if (requiresIosResolution) {
-                    resolvedStream?.url ?: buildStreamingUrl(track.id, protocol)
-                } else {
-                    url.ifBlank { buildStreamingUrl(track.id, protocol) }
-                }
+                val resolvedUrl = url.ifBlank { buildStreamingUrl(track.id, protocol) }
                 if (resolvedUrl.isBlank()) return null
                 MediaItem(
                     title = track.title,
@@ -594,7 +636,7 @@ class DeviceAudioPlayerQueue(
                     duration = track.durationMs.milliseconds,
                     coverURL = artworkUrl.orEmpty(),
                     url = resolvedUrl,
-                    protocol = resolvedStream?.protocol ?: protocol)
+                    protocol = protocol)
             }
 
             is QueueEntry.LocalTrack -> {
@@ -621,15 +663,22 @@ class DeviceAudioPlayerQueue(
             url = url)
     }
 
+    private inline fun <T> runCatchingNonCancellation(block: () -> T): Result<T> =
+
+        runCatching(block).onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+
+
+
     private val localServerOrNull: LocalServer?
         get() = runCatching { getKoin().getOrNull<LocalServer>() }.getOrNull()
 
     private suspend fun buildStreamingUrl(trackId: String, protocol: StreamProtocol): String {
-        val baseUrl = localServerOrNull?.awaitBaseUrl() ?: run {
-            val port: Int =
-                settingsProvider.settingsState.mapNotNull { it?.playbackProxyServerPort }.first()
-            "http://127.0.0.1:$port"
-        }
+        val baseUrl = localServerOrNull?.port?.value?.let { "http://127.0.0.1:$it" }
+            ?: localServerOrNull?.awaitBaseUrl(500.milliseconds)
+            ?: run {
+                val port = settingsProvider.settingsState.value?.playbackProxyServerPort ?: 0
+                if (port > 0) "http://127.0.0.1:$port" else "http://127.0.0.1:14769"
+            }
         return when (protocol) {
             StreamProtocol.HLS, StreamProtocol.DASH -> "${baseUrl.trimEnd('/')}/manifest/$trackId"
             StreamProtocol.PROGRESSIVE -> "${baseUrl.trimEnd('/')}/stream/$trackId"

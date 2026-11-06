@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,89 +59,74 @@ import com.composeunstyled.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
-import org.koin.compose.koinInject
+import org.koin.compose.viewmodel.koinViewModel
 import org.spotube.millennium.composables.MillenniumButton
 import org.spotube.millennium.composables.MillenniumButtonStyle
 import org.spotube.millennium.composables.MillenniumIcon
 import org.spotube.millennium.composables.MillenniumIconButton
 import org.spotube.millennium.composables.MillenniumIconButtonStyle
 import org.spotube.millennium.composables.MillenniumTextField
-import org.spotube.spotube.core.audioplayer.AudioPlayerQueue
-import org.spotube.spotube.core.logger.AppLogBuffer
 import org.spotube.spotube.core.logger.LogEntry
-import org.spotube.spotube.core.server.LocalServer
 import org.spotube.spotube.core.ui.component.ApplicationMainBar
 import org.spotube.spotube.core.ui.theming.AppTheme
-import org.spotube.spotube.modules.plugin.PluginManager
 import org.spotube.spotube.modules.shell.LocalAppShellBottomInset
 import org.spotube.spotube.resources.iconsax.Iconsax
 import org.spotube.spotube.resources.iconsax.IconsaxDocumentText
-import org.spotube.spotube.resources.iconsax.IconsaxFilterSearch
 import org.spotube.spotube.resources.iconsax.IconsaxShare
 import org.spotube.spotube.resources.iconsax.IconsaxTrash
 import spotube.composeapp.generated.resources.Res
+import spotube.composeapp.generated.resources.settings_logs_audio_plugin
+import spotube.composeapp.generated.resources.settings_logs_builtin_plugin
 import spotube.composeapp.generated.resources.settings_logs_clear
 import spotube.composeapp.generated.resources.settings_logs_copied
 import spotube.composeapp.generated.resources.settings_logs_copy
+import spotube.composeapp.generated.resources.settings_logs_current_track
+import spotube.composeapp.generated.resources.settings_logs_diagnostics_title
 import spotube.composeapp.generated.resources.settings_logs_empty
 import spotube.composeapp.generated.resources.settings_logs_filter_all
 import spotube.composeapp.generated.resources.settings_logs_filter_errors
 import spotube.composeapp.generated.resources.settings_logs_filter_warnings
+import spotube.composeapp.generated.resources.settings_logs_hide_stacktrace
+import spotube.composeapp.generated.resources.settings_logs_no_track
+import spotube.composeapp.generated.resources.settings_logs_proxy_server
 import spotube.composeapp.generated.resources.settings_logs_search_hint
+import spotube.composeapp.generated.resources.settings_logs_show_stacktrace
+import spotube.composeapp.generated.resources.settings_logs_status_active
+import spotube.composeapp.generated.resources.settings_logs_status_starting
 import spotube.composeapp.generated.resources.settings_logs_title
 
-private enum class LogFilter {
-    ALL,
-    ERRORS,
-    WARNINGS
-}
-
 @Composable
-fun LogsScreen() {
+fun LogsScreen(
+    viewModel: LogsViewModel = koinViewModel()
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         ApplicationMainBar(
             backButton = true,
             title = { Text(stringResource(Res.string.settings_logs_title)) }
         )
-        LogsContent(modifier = Modifier.weight(1f))
+        LogsContent(
+            viewModel = viewModel,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
 @Composable
-internal fun LogsContent(modifier: Modifier = Modifier) {
-    val logs by AppLogBuffer.logs.collectAsStateWithLifecycle()
+internal fun LogsContent(
+    viewModel: LogsViewModel = koinViewModel(),
+    modifier: Modifier = Modifier
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
     val shellBottomInset = LocalAppShellBottomInset.current
     val clipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
 
-    val localServer = runCatching { koinInject<LocalServer>() }.getOrNull()
-    val localServerPort by (localServer?.port?.collectAsStateWithLifecycle() ?: remember { mutableStateOf<Int?>(null) })
-    val pluginManager = runCatching { koinInject<PluginManager>() }.getOrNull()
-    val audioPlugin by (pluginManager?.selectedAudioPlugin?.collectAsStateWithLifecycle() ?: remember { mutableStateOf(null) })
-    val audioPlayerQueue = runCatching { koinInject<AudioPlayerQueue>() }.getOrNull()
-    val currentQueueEntry by (audioPlayerQueue?.currentQueueEntryFlow?.collectAsStateWithLifecycle() ?: remember { mutableStateOf(null) })
-
-    val searchState = rememberTextFieldState("")
-    val searchQuery = searchState.text.toString().trim().lowercase()
-    var selectedFilter by remember { mutableStateOf(LogFilter.ALL) }
-    var copiedFeedback by remember { mutableStateOf(false) }
-
-    val filteredLogs = remember(logs, searchQuery, selectedFilter) {
-        logs.filter { entry ->
-            val matchesSeverity = when (selectedFilter) {
-                LogFilter.ALL -> true
-                LogFilter.ERRORS -> entry.severity == Severity.Error || entry.severity == Severity.Assert
-                LogFilter.WARNINGS -> entry.severity == Severity.Warn || entry.severity == Severity.Error || entry.severity == Severity.Assert
-            }
-            val matchesSearch = if (searchQuery.isBlank()) {
-                true
-            } else {
-                entry.tag.lowercase().contains(searchQuery) || entry.message.lowercase().contains(searchQuery)
-            }
-            matchesSeverity && matchesSearch
-        }.asReversed()
+    val searchState = rememberTextFieldState(state.searchQuery)
+    LaunchedEffect(searchState.text) {
+        viewModel.onSearchQueryChanged(searchState.text.toString())
     }
 
+    var copiedFeedback by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     Column(modifier = modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -157,7 +141,7 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "System Diagnostics",
+                    text = stringResource(Res.string.settings_logs_diagnostics_title),
                     style = AppTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     color = AppTheme.colors.primary
@@ -167,15 +151,19 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Proxy Server:",
+                        text = stringResource(Res.string.settings_logs_proxy_server),
                         style = AppTheme.typography.bodySmall,
-                        color = AppTheme.colors.textMuted
+                        color = AppTheme.colors.onSurfaceVariant
                     )
                     Text(
-                        text = if (localServerPort != null) "127.0.0.1:$localServerPort (Active)" else "Starting...",
+                        text = if (state.diagnostics.isProxyActive) {
+                            "127.0.0.1:${state.diagnostics.proxyPort} (${stringResource(Res.string.settings_logs_status_active)})"
+                        } else {
+                            stringResource(Res.string.settings_logs_status_starting)
+                        },
                         style = AppTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
-                        color = if (localServerPort != null) AppTheme.colors.primary else AppTheme.colors.textMuted
+                        color = if (state.diagnostics.isProxyActive) AppTheme.colors.primary else AppTheme.colors.onSurfaceVariant
                     )
                 }
                 Row(
@@ -183,12 +171,12 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Audio Plugin:",
+                        text = stringResource(Res.string.settings_logs_audio_plugin),
                         style = AppTheme.typography.bodySmall,
-                        color = AppTheme.colors.textMuted
+                        color = AppTheme.colors.onSurfaceVariant
                     )
                     Text(
-                        text = audioPlugin?.name ?: "NewPipe YouTube (Built-in)",
+                        text = state.diagnostics.audioPluginId ?: stringResource(Res.string.settings_logs_builtin_plugin),
                         style = AppTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
                         color = AppTheme.colors.onSurface
@@ -199,17 +187,12 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Current Track:",
+                        text = stringResource(Res.string.settings_logs_current_track),
                         style = AppTheme.typography.bodySmall,
-                        color = AppTheme.colors.textMuted
+                        color = AppTheme.colors.onSurfaceVariant
                     )
                     Text(
-                        text = currentQueueEntry?.let { entry ->
-                            when (entry) {
-                                is org.spotube.spotube.core.audioplayer.QueueEntry.StreamingTrack -> entry.track.title
-                                is org.spotube.spotube.core.audioplayer.QueueEntry.LocalTrack -> entry.name
-                            }
-                        } ?: "None",
+                        text = state.diagnostics.currentTrackTitle ?: stringResource(Res.string.settings_logs_no_track),
                         style = AppTheme.typography.bodySmall,
                         fontWeight = FontWeight.Medium,
                         color = AppTheme.colors.onSurface
@@ -226,20 +209,13 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
         ) {
             MillenniumTextField(
                 state = searchState,
-                placeholder = { Text(stringResource(Res.string.settings_logs_search_hint), fontSize = 12.sp) },
-                leadingIcon = {
-                    MillenniumIcon(
-                        imageVector = Iconsax.IconsaxFilterSearch,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                },
+                placeholder = stringResource(Res.string.settings_logs_search_hint),
                 modifier = Modifier.weight(1f)
             )
 
             MillenniumButton(
                 onClick = {
-                    val fullLogs = AppLogBuffer.formatAllLogs()
+                    val fullLogs = viewModel.getFormattedLogsForExport()
                     clipboardManager.setText(AnnotatedString(fullLogs))
                     copiedFeedback = true
                     coroutineScope.launch {
@@ -256,13 +232,17 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (copiedFeedback) stringResource(Res.string.settings_logs_copied) else stringResource(Res.string.settings_logs_copy),
+                    text = if (copiedFeedback) {
+                        stringResource(Res.string.settings_logs_copied)
+                    } else {
+                        stringResource(Res.string.settings_logs_copy)
+                    },
                     style = AppTheme.typography.labelSmall
                 )
             }
 
             MillenniumIconButton(
-                onClick = { AppLogBuffer.clear() },
+                onClick = { viewModel.onClearLogs() },
                 style = MillenniumIconButtonStyle.Secondary,
                 contentDescription = stringResource(Res.string.settings_logs_clear)
             ) {
@@ -281,28 +261,28 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
         ) {
             LogFilterChip(
                 label = stringResource(Res.string.settings_logs_filter_all),
-                selected = selectedFilter == LogFilter.ALL,
-                count = logs.size,
-                onClick = { selectedFilter = LogFilter.ALL }
+                selected = state.selectedFilter == LogFilter.ALL,
+                count = state.totalCount,
+                onClick = { viewModel.onFilterChanged(LogFilter.ALL) }
             )
             LogFilterChip(
                 label = stringResource(Res.string.settings_logs_filter_errors),
-                selected = selectedFilter == LogFilter.ERRORS,
-                count = logs.count { it.severity == Severity.Error || it.severity == Severity.Assert },
+                selected = state.selectedFilter == LogFilter.ERRORS,
+                count = state.errorCount,
                 chipColor = Color(0xFFE53935),
-                onClick = { selectedFilter = LogFilter.ERRORS }
+                onClick = { viewModel.onFilterChanged(LogFilter.ERRORS) }
             )
             LogFilterChip(
                 label = stringResource(Res.string.settings_logs_filter_warnings),
-                selected = selectedFilter == LogFilter.WARNINGS,
-                count = logs.count { it.severity == Severity.Warn },
+                selected = state.selectedFilter == LogFilter.WARNINGS,
+                count = state.warningCount,
                 chipColor = Color(0xFFFB8C00),
-                onClick = { selectedFilter = LogFilter.WARNINGS }
+                onClick = { viewModel.onFilterChanged(LogFilter.WARNINGS) }
             )
         }
 
         // Logs list
-        if (filteredLogs.isEmpty()) {
+        if (state.filteredLogs.isEmpty()) {
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentAlignment = Alignment.Center
@@ -314,13 +294,13 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                     MillenniumIcon(
                         imageVector = Iconsax.IconsaxDocumentText,
                         contentDescription = null,
-                        tint = AppTheme.colors.textMuted,
+                        tint = AppTheme.colors.onSurfaceVariant,
                         modifier = Modifier.size(36.dp)
                     )
                     Text(
                         text = stringResource(Res.string.settings_logs_empty),
                         style = AppTheme.typography.bodyMedium,
-                        color = AppTheme.colors.textMuted
+                        color = AppTheme.colors.onSurfaceVariant
                     )
                 }
             }
@@ -331,7 +311,7 @@ internal fun LogsContent(modifier: Modifier = Modifier) {
                 contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp + shellBottomInset),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                items(filteredLogs, key = { it.id }) { logEntry ->
+                items(state.filteredLogs, key = { it.id }) { logEntry ->
                     LogEntryCard(entry = logEntry)
                 }
             }
@@ -373,8 +353,8 @@ private fun LogEntryCard(entry: LogEntry) {
         Severity.Error, Severity.Assert -> Color(0xFFE53935)
         Severity.Warn -> Color(0xFFFB8C00)
         Severity.Info -> AppTheme.colors.primary
-        Severity.Debug -> AppTheme.colors.textMuted
-        Severity.Verbose -> AppTheme.colors.textMuted.copy(alpha = 0.7f)
+        Severity.Debug -> AppTheme.colors.onSurfaceVariant
+        Severity.Verbose -> AppTheme.colors.onSurfaceVariant.copy(alpha = 0.7f)
     }
 
     Box(
@@ -410,7 +390,7 @@ private fun LogEntryCard(entry: LogEntry) {
                     text = entry.formattedTime,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
-                    color = AppTheme.colors.textMuted
+                    color = AppTheme.colors.onSurfaceVariant
                 )
 
                 // Tag
@@ -435,7 +415,12 @@ private fun LogEntryCard(entry: LogEntry) {
             // Throwable toggle / stack trace
             if (entry.throwable != null) {
                 Text(
-                    text = if (expanded) "▲ Hide stack trace" else "▼ Show stack trace (${entry.throwable::class.simpleName})",
+                    text = if (expanded) {
+                        stringResource(Res.string.settings_logs_hide_stacktrace)
+                    } else {
+                        val className = entry.throwable::class.simpleName ?: "Throwable"
+                        "${stringResource(Res.string.settings_logs_show_stacktrace)} ($className)"
+                    },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
                     color = severityColor
@@ -445,7 +430,7 @@ private fun LogEntryCard(entry: LogEntry) {
                         text = entry.throwable.stackTraceToString(),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = AppTheme.colors.textMuted,
+                        color = AppTheme.colors.onSurfaceVariant,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 4.dp)

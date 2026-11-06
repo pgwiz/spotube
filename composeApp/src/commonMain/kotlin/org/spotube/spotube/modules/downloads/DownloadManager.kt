@@ -29,6 +29,7 @@ import org.spotube.plugin_interfaces.plugin_apis.audio.StreamProtocol
 import org.spotube.spotube.modules.settings.SettingsRepository
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.head
 import io.ktor.client.request.headers
 import io.ktor.client.statement.bodyAsChannel
@@ -456,30 +457,30 @@ class DownloadManager(
 
     private suspend fun probeUrl(id: String, url: String): Pair<Long, Boolean> {
         return try {
-            val response = httpClient.get(url) {
+            httpClient.prepareGet(url) {
                 headers {
                     append(HttpHeaders.Range, "bytes=0-0")
                 }
                 applyClientHeaders(url)
+            }.execute { response ->
+                if (!response.status.isSuccess() && response.status != HttpStatusCode.PartialContent) {
+                    logger.w { "[Download $id] PROBE returned HTTP ${response.status.value}; failing download early" }
+                    throw DownloadException(getString(Res.string.downloads_error_http, response.status.value))
+                }
+                val contentRange = response.headers[HttpHeaders.ContentRange]
+                val totalFromContentRange = contentRange?.substringAfterLast('/')?.trim()?.toLongOrNull()
+                val contentLength = totalFromContentRange ?: response.contentLength() ?: 0L
+                val acceptRanges = response.headers[HttpHeaders.AcceptRanges]
+                val supportsRanges = response.status == HttpStatusCode.PartialContent ||
+                    acceptRanges?.equals("bytes", ignoreCase = true) == true
+                val contentType = response.headers[HttpHeaders.ContentType]
+                logger.i {
+                    "[Download $id] PROBE (bytes=0-0) -> HTTP ${response.status.value} type=$contentType " +
+                        "length=$contentLength contentRange=$contentRange acceptRanges=$acceptRanges"
+                }
+                rejectVideo(id, contentType)
+                Pair(contentLength, supportsRanges)
             }
-            if (!response.status.isSuccess() && response.status != HttpStatusCode.PartialContent) {
-                logger.w { "[Download $id] PROBE returned HTTP ${response.status.value}; failing download early" }
-                throw DownloadException(getString(Res.string.downloads_error_http, response.status.value))
-            }
-            val contentRange = response.headers[HttpHeaders.ContentRange]
-            val totalFromContentRange = contentRange?.substringAfterLast('/')?.trim()?.toLongOrNull()
-            val contentLength = totalFromContentRange ?: response.contentLength() ?: 0L
-            val acceptRanges = response.headers[HttpHeaders.AcceptRanges]
-            val supportsRanges = response.status == HttpStatusCode.PartialContent ||
-                acceptRanges?.equals("bytes", ignoreCase = true) == true
-            val contentType = response.headers[HttpHeaders.ContentType]
-            logger.i {
-                "[Download $id] PROBE (bytes=0-0) -> HTTP ${response.status.value} type=$contentType " +
-                    "length=$contentLength contentRange=$contentRange acceptRanges=$acceptRanges"
-            }
-            runCatching { response.bodyAsChannel().discard() }
-            rejectVideo(id, contentType)
-            Pair(contentLength, supportsRanges)
         } catch (e: DownloadException) {
             throw e
         } catch (e: Exception) {
@@ -500,13 +501,13 @@ class DownloadManager(
     }
 
     private fun isYouTubeOrGoogleVideo(url: String): Boolean {
-        val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: ""
-        return host.endsWith("googlevideo.com") ||
-            host.endsWith("youtube.com") ||
-            host.endsWith("youtu.be") ||
-            url.contains("googlevideo.com", ignoreCase = true) ||
-            url.contains("youtube.com", ignoreCase = true) ||
-            url.contains("youtu.be", ignoreCase = true)
+        val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: return false
+        return host == "googlevideo.com" || host.endsWith(".googlevideo.com") ||
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+            host == "youtu.be" || host.endsWith(".youtu.be")
+
+
+
     }
 
     private fun io.ktor.client.request.HttpRequestBuilder.applyClientHeaders(targetUrl: String) {

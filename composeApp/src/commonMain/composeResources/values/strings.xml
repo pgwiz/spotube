@@ -123,6 +123,16 @@
     <string name="settings_logs_filter_errors">Errors</string>
     <string name="settings_logs_filter_warnings">Warnings</string>
     <string name="settings_logs_search_hint">Filter by tag or keyword…</string>
+    <string name="settings_logs_diagnostics_title">System Diagnostics</string>
+    <string name="settings_logs_proxy_server">Proxy Server:</string>
+    <string name="settings_logs_status_active">Active</string>
+    <string name="settings_logs_status_starting">Starting…</string>
+    <string name="settings_logs_audio_plugin">Audio Plugin:</string>
+    <string name="settings_logs_builtin_plugin">NewPipe YouTube (Built-in)</string>
+    <string name="settings_logs_current_track">Current Track:</string>
+    <string name="settings_logs_no_track">None</string>
+    <string name="settings_logs_hide_stacktrace">▲ Hide stack trace</string>
+    <string name="settings_logs_show_stacktrace">▼ Show stack trace</string>
 
     <string name="common_close">Close</string>
     <string name="common_save">Save</string>

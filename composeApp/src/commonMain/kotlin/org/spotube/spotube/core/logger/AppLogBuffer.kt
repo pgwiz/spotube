@@ -19,11 +19,10 @@ package org.spotube.spotube.core.logger
 
 import co.touchlab.kermit.LogWriter
 import co.touchlab.kermit.Severity
+import kotlin.time.Clock
+import kotlin.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import kotlinx.datetime.Clock
-import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 
@@ -49,33 +48,45 @@ data class LogEntry(
 object AppLogBuffer {
     private const val MAX_LOGS = 1000
     private var counter = 0L
+    private val lock = Any()
+    private val ringBuffer = ArrayDeque<LogEntry>(MAX_LOGS)
 
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs = _logs.asStateFlow()
 
     fun append(severity: Severity, tag: String, message: String, throwable: Throwable? = null) {
-        val entry = LogEntry(
-            id = ++counter,
-            severity = severity,
-            tag = tag,
-            message = message,
-            throwable = throwable
-        )
-        _logs.update { list ->
-            if (list.size >= MAX_LOGS) {
-                list.drop(list.size - MAX_LOGS + 1) + entry
-            } else {
-                list + entry
+        val entry: LogEntry
+        val snapshot: List<LogEntry>
+        synchronized(lock) {
+            entry = LogEntry(
+                id = ++counter,
+                timestamp = Clock.System.now(),
+                severity = severity,
+                tag = tag,
+                message = message,
+                throwable = throwable
+            )
+            if (ringBuffer.size >= MAX_LOGS) {
+                ringBuffer.removeFirst()
             }
+            ringBuffer.addLast(entry)
+            snapshot = ringBuffer.toList()
         }
+        _logs.value = snapshot
     }
 
     fun clear() {
+        synchronized(lock) {
+            ringBuffer.clear()
+        }
         _logs.value = emptyList()
     }
 
     fun formatAllLogs(): String {
-        return _logs.value.joinToString("\n") { entry ->
+        val currentLogs = synchronized(lock) {
+            ringBuffer.toList()
+        }
+        return currentLogs.joinToString("\n") { entry ->
             val header = "[${entry.formattedTime}] [${entry.severity.name}] [${entry.tag}] ${entry.message}"
             val err = entry.throwable?.stackTraceToString()?.let { "\n$it" }.orEmpty()
             header + err

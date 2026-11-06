@@ -38,6 +38,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.core.component.KoinComponent
 import kotlin.math.abs
 import kotlin.time.Clock
+import io.ktor.http.Url
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 data class CachedStreamUrl(
@@ -80,7 +83,7 @@ class StreamingUrlRepository(
     private val audioPlayerQueue: AudioPlayerQueue,
     private val matchedTracksRepository: TrackSourceRepository,
     private val settingsRepository: UserSettingsSource,
-    private val streamUrlCacheTtlMs: Long = 30.seconds.inWholeMilliseconds,
+    private val streamUrlCacheTtlMs: Long = 20.minutes.inWholeMilliseconds,
     private val platform: PlatformType = currentPlatform) : KoinComponent {
 
     private val logger by injectLogger<StreamingUrlRepository>()
@@ -187,7 +190,7 @@ class StreamingUrlRepository(
             }
 
             logger.d { "Cached source did not provide a stream for track $trackId; falling back to track lookup" }
-            matchedTracksRepository.deleteTrackSource(track, audioPlugin.pluginId)
+
         }
 
         logger.d { "Attempting stream resolution for track $trackId using track lookup" }
@@ -321,8 +324,13 @@ class StreamingUrlRepository(
         source: AudioSource.Streamed,
         selectedStream: AudioStream,
         pluginId: String) {
-        val expiresAtMs = Clock.System.now().toEpochMilliseconds() + streamUrlCacheTtlMs
+        val calculatedExpiresAtMs = calculateStreamExpiration(info.url)
+        val expiresAtMs = calculatedExpiresAtMs ?: (Clock.System.now().toEpochMilliseconds() + streamUrlCacheTtlMs)
+        val now = Clock.System.now().toEpochMilliseconds()
         streamUrlCacheMutex.withLock {
+            if (streamUrlCache.size > 100) {
+                streamUrlCache.entries.removeAll { it.value.expiresAtMs <= now }
+            }
             streamUrlCache[trackId] = CachedStreamUrl(
                 url = info.url,
                 protocol = info.protocol,
@@ -335,6 +343,23 @@ class StreamingUrlRepository(
                 preferredQuality = preferredQuality,
                 pluginId = pluginId)
         }
+    }
+
+    private fun calculateStreamExpiration(url: String): Long? {
+        return runCatching {
+            val parsed = Url(url)
+            val expireStr = parsed.parameters["expire"] ?: return null
+            val expireEpochSec = expireStr.toLongOrNull() ?: return null
+            val expireEpochMs = expireEpochSec * 1000L
+            val nowMs = Clock.System.now().toEpochMilliseconds()
+            val safeExpiryMs = expireEpochMs - 5.minutes.inWholeMilliseconds
+            if (safeExpiryMs > nowMs) {
+                val maxExpiryMs = nowMs + 6.hours.inWholeMilliseconds
+                minOf(safeExpiryMs, maxExpiryMs)
+            } else {
+                null
+            }
+        }.getOrNull()
     }
 
     suspend fun invalidateCachedStreamUrl(trackId: String, url: String? = null) {

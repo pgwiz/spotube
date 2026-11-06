@@ -89,6 +89,7 @@ import org.spotube.spotube.modules.settings.SettingsRepository
 import org.spotube.spotube.modules.settings.UserSettingsSource
 import org.spotube.spotube.modules.settings.SettingsViewModel
 import org.spotube.spotube.modules.settings.JamSettingsViewModel
+import org.spotube.spotube.modules.settings.logs.LogsViewModel
 import org.spotube.spotube.modules.settings.LocalMediaFoldersViewModel
 import org.spotube.spotube.modules.shell.AppShellViewModel
 import org.spotube.spotube.modules.shell.PlayerOptionsViewModel
@@ -154,6 +155,7 @@ val sharedModules = module {
     singleOf(::SettingsRepository) { bind<UserSettingsSource>() }
     viewModelOf(::SettingsViewModel) { bind<SettingsProvider>() }
     viewModelOf(::JamSettingsViewModel)
+    viewModelOf(::LogsViewModel)
     viewModel {
         val repository = get<SettingsRepository>()
         LocalMediaFoldersViewModel(repository.userSettings) { folders ->

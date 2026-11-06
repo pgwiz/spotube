@@ -476,7 +476,7 @@ internal class StreamProxy(
                     var totalBytes = 0L
                     try {
                         val source = upstream.bodyAsChannel()
-                        val buffer = ByteArray(64 * 1024)
+                        val buffer = ByteArray(256 * 1024)
                         fileSystem.sink(cacheFile).buffer().use { sink ->
                             while (true) {
                                 val read = source.readAvailable(buffer, 0, buffer.size)
@@ -583,13 +583,13 @@ internal class StreamProxy(
     private fun decodeUrl(encoded: String): String = encoded.decodeURLQueryComponent()
 
     private fun isYouTubeOrGoogleVideo(url: String): Boolean {
-        val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: ""
-        return host.endsWith("googlevideo.com") ||
-            host.endsWith("youtube.com") ||
-            host.endsWith("youtu.be") ||
-            url.contains("googlevideo.com", ignoreCase = true) ||
-            url.contains("youtube.com", ignoreCase = true) ||
-            url.contains("youtu.be", ignoreCase = true)
+        val host = runCatching { Url(url).host.lowercase() }.getOrNull() ?: return false
+        return host == "googlevideo.com" || host.endsWith(".googlevideo.com") ||
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+            host == "youtu.be" || host.endsWith(".youtu.be")
+
+
+
     }
 
     private fun applyUpstreamHeaders(
@@ -647,7 +647,7 @@ internal class StreamProxy(
         headerName: String
     ) {
         request.headers.getAll(headerName)?.forEach { value ->
-            builder[headerName] = value
+            builder.append(headerName, value)
         }
     }
 

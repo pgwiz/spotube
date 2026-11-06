@@ -81,6 +81,7 @@ import org.spotube.spotube.resources.iconsax.IconsaxCloseSquare
 import org.spotube.spotube.resources.iconsax.IconsaxColorSwatch
 import org.spotube.spotube.resources.iconsax.IconsaxDirectboxReceive
 import org.spotube.spotube.resources.iconsax.IconsaxDocumentDownload
+import org.spotube.spotube.resources.iconsax.IconsaxDocumentText
 import org.spotube.spotube.resources.iconsax.IconsaxForbidden
 import org.spotube.spotube.resources.iconsax.IconsaxHeart2
 import org.spotube.spotube.resources.iconsax.IconsaxImportArrow2

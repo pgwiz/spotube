@@ -55,16 +55,18 @@ class RealNewPipeAudioAPI : AudioAPI, KoinComponent {
         var confidence = 0f
 
         val videoTitle = normalize(video.title)
-        val isTopicChannel = video.uploader.trim().endsWith("- Topic", ignoreCase = true) ||
-            video.uploader.trim().contains("Topic", ignoreCase = true)
+        val isTopicChannel = video.uploader.trim().endsWith("- Topic", ignoreCase = true)
+
         val uploaderRaw = video.uploader.replace(Regex("(?i)\\s*-\\s*topic$"), "").trim()
         val uploader = normalize(uploaderRaw)
         val artistNames = track.artists.map { normalize(it.name) }.filter { it.isNotEmpty() }
         val title = coreTitle(track.title)
 
-        val videoTokens = videoTitle.split(' ').toSet()
-        val isTitleMatch = title.isNotEmpty() &&
-            (title in videoTitle || videoTitle in title || title.split(' ').filter { it.length > 2 }.all { it in videoTokens })
+        val videoTokens = videoTitle.split(' ').filter { it.isNotEmpty() }.toSet()
+        val significantTokens = title.split(' ').filter { it.length > 2 }
+        val hasSignificantTokenMatch = significantTokens.isNotEmpty() && significantTokens.all { it in videoTokens }
+        val isTitleMatch = title.isNotEmpty() && videoTitle.isNotEmpty() &&
+            (title in videoTitle || (videoTitle.length >= 3 && videoTitle in title) || hasSignificantTokenMatch)
         val isArtistInTitle = artistNames.any { it in videoTitle }
         val isAlbumInTitle = track.album?.title?.let { normalize(it) }
             ?.takeIf { it.isNotEmpty() }?.let { it in videoTitle } ?: false
@@ -92,7 +94,7 @@ class RealNewPipeAudioAPI : AudioAPI, KoinComponent {
         else if (durationDiff <= 30_000) confidence += 0.15f
         else if (durationDiff <= 60_000) confidence += 0.1f
         else if (durationDiff <= 120_000) confidence += 0.05f
-        else if (!hasValidDurations) confidence += 0.1f // Don't penalize when duration is unknown
+
 
         if (isArtistInTitle) confidence += 0.1f
         if (isAlbumInTitle) confidence += 0.1f
