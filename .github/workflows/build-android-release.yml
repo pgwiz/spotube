@@ -71,7 +71,16 @@ jobs:
           chmod +x gradlew
           mkdir -p src/jvmMain/resources/nucleus/native/linux-x64
           touch src/jvmMain/resources/nucleus/native/linux-x64/libcompose_webview_linux.so
-          ./gradlew publishToMavenLocal -x :webview-compose:buildNativeLinux -x :webview-compose:verifyPublicationCoordinates --no-daemon
+          export GRADLE_OPTS="-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=120000"
+          for attempt in 1 2 3 4 5; do
+            echo "Publish attempt $attempt..."
+            if ./gradlew publishToMavenLocal -x :webview-compose:buildNativeLinux -x :webview-compose:verifyPublicationCoordinates --no-daemon; then
+              echo "Successfully published compose-webview to mavenLocal!"
+              break
+            fi
+            echo "Attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
 
       - name: Configure Android signing
         env:
