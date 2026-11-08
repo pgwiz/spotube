@@ -57,10 +57,22 @@ jobs:
         with:
           targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
 
+      - name: Configure Gradle wrapper mirrors fallback
+        run: |
+          if ! curl -s -f -r 0-100 --connect-timeout 8 https://services.gradle.org/distributions/gradle-9.4.0-all.zip >/dev/null 2>&1; then
+            echo "services.gradle.org is slow or returning 504. Switching to mirrors.cloud.tencent.com..."
+            sed -i 's|https\\://services.gradle.org/distributions/|https\\://mirrors.cloud.tencent.com/gradle/|g' gradle/wrapper/gradle-wrapper.properties
+            sed -i 's|validateDistributionUrl=true|validateDistributionUrl=false|g' gradle/wrapper/gradle-wrapper.properties
+            if [ -f compose-webview/gradle/wrapper/gradle-wrapper.properties ]; then
+              sed -i 's|https\\://services.gradle.org/distributions/|https\\://mirrors.cloud.tencent.com/gradle/|g' compose-webview/gradle/wrapper/gradle-wrapper.properties
+              sed -i 's|validateDistributionUrl=true|validateDistributionUrl=false|g' compose-webview/gradle/wrapper/gradle-wrapper.properties
+            fi
+          else
+            echo "services.gradle.org is reachable."
+          fi
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.4.0'
 
       - name: Install Linux build dependencies
         run: |
@@ -74,15 +86,21 @@ jobs:
           mkdir -p src/jvmMain/resources/nucleus/native/linux-x64
           touch src/jvmMain/resources/nucleus/native/linux-x64/libcompose_webview_linux.so
           export GRADLE_OPTS="-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=120000"
+          success="false"
           for attempt in 1 2 3 4 5; do
             echo "Publish attempt $attempt..."
             if ./gradlew publishToMavenLocal -x :webview-compose:buildNativeLinux -x :webview-compose:verifyPublicationCoordinates --no-daemon; then
               echo "Successfully published compose-webview to mavenLocal!"
+              success="true"
               break
             fi
             echo "Attempt $attempt failed, retrying in 5s..."
             sleep 5
           done
+          if [ "$success" != "true" ]; then
+            echo "Failed to publish compose-webview after 5 attempts!"
+            exit 1
+          fi
 
       - name: Configure Android signing
         env:
@@ -110,26 +128,37 @@ jobs:
       - name: Assemble Android Release APK
         run: |
           export GRADLE_OPTS="-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=120000"
+          success="false"
           for attempt in 1 2 3; do
             echo "Assemble attempt $attempt..."
             if [ "${{ inputs.channel }}" = "nightly" ]; then
               if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --stacktrace; then
+                success="true"
                 break
               fi
             else
               if ./gradlew :composeApp:assembleStableRelease --stacktrace; then
+                success="true"
                 break
               fi
             fi
             echo "Attempt $attempt failed, retrying in 10s..."
             sleep 10
           done
+          if [ "$success" != "true" ]; then
+            echo "Assemble failed after 3 attempts!"
+            exit 1
+          fi
 
       - name: Locate and Rename APK
         run: |
           APK_FILE=$(find composeApp/build/outputs/apk -path "*elease*" -name "*.apk" -type f | head -1)
           if [ -z "$APK_FILE" ]; then
             APK_FILE=$(find composeApp/build/outputs/apk -name "*.apk" -type f | head -1)
+          fi
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "::error::No APK file found in composeApp/build/outputs/apk!"
+            exit 1
           fi
           echo "Found APK at: $APK_FILE"
           cp "$APK_FILE" Spotube-android-all-arch.apk
