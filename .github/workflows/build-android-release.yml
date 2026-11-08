@@ -59,6 +59,8 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.4.0'
 
       - name: Install Linux build dependencies
         run: |
@@ -107,11 +109,21 @@ jobs:
 
       - name: Assemble Android Release APK
         run: |
-          if [ "${{ inputs.channel }}" = "nightly" ]; then
-            ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --stacktrace
-          else
-            ./gradlew :composeApp:assembleStableRelease --stacktrace
-          fi
+          export GRADLE_OPTS="-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=120000"
+          for attempt in 1 2 3; do
+            echo "Assemble attempt $attempt..."
+            if [ "${{ inputs.channel }}" = "nightly" ]; then
+              if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --stacktrace; then
+                break
+              fi
+            else
+              if ./gradlew :composeApp:assembleStableRelease --stacktrace; then
+                break
+              fi
+            fi
+            echo "Attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
 
       - name: Locate and Rename APK
         run: |
