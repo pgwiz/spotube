@@ -23,7 +23,9 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import platform.AVFAudio.AVAudioSession
 import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.AVAudioSessionModeDefault
+import platform.AVFAudio.setActive
 import platform.Foundation.NSNotificationCenter
+import platform.Foundation.NSNumber
 import platform.Foundation.NSOperationQueue
 import platform.MediaPlayer.MPChangePlaybackPositionCommandEvent
 import platform.MediaPlayer.MPMediaItemPropertyAlbumTitle
@@ -53,8 +55,6 @@ internal class IosMediaSession {
     private var onNext: (() -> Unit)? = null
     private var onPrevious: (() -> Unit)? = null
 
-    private var lastIsPlaying = false
-
     fun configure(
         onPlay: () -> Unit,
         onPause: () -> Unit,
@@ -71,24 +71,21 @@ internal class IosMediaSession {
         if (configured) return
         configured = true
 
-        runCatching {
-            audioSession.setCategory(
-                category = AVAudioSessionCategoryPlayback,
-                mode = AVAudioSessionModeDefault,
-                options = 0u,
-                error = null
-            )
-        }
+        audioSession.setCategory(
+            category = AVAudioSessionCategoryPlayback,
+            mode = AVAudioSessionModeDefault,
+            options = 0u,
+            error = null)
         registerAudioSessionNotifications()
         registerRemoteCommands()
     }
 
     fun activate() {
-        // AVPlayer automatically activates the shared audio session on play.
+        audioSession.setActive(true, error = null)
     }
 
     fun deactivate() {
-        // AVPlayer automatically manages session deactivation when paused or stopped.
+        audioSession.setActive(false, error = null)
     }
 
     fun update(
@@ -102,25 +99,24 @@ internal class IosMediaSession {
             return
         }
 
-        val info = mutableMapOf<Any?, Any?>()
-        info[MPMediaItemPropertyTitle] = item.title
-        info[MPMediaItemPropertyArtist] = item.artist
-        item.album.takeIf { it.isNotBlank() }?.let {
-            info[MPMediaItemPropertyAlbumTitle] = it
+        val info = buildMap<Any?, Any?> {
+            put(MPMediaItemPropertyTitle, item.title)
+            put(MPMediaItemPropertyArtist, item.artist)
+            item.album.takeIf { it.isNotBlank() }?.let {
+                put(MPMediaItemPropertyAlbumTitle, it)
+            }
+            if (durationSeconds.isFinite() && durationSeconds > 0) {
+                put(MPMediaItemPropertyPlaybackDuration, durationSeconds)
+            }
+            if (positionSeconds.isFinite() && positionSeconds >= 0) {
+                put(MPNowPlayingInfoPropertyElapsedPlaybackTime, positionSeconds)
+            }
+            put(MPNowPlayingInfoPropertyPlaybackRate, if (isPlaying) 1.0 else 0.0)
         }
-        if (durationSeconds.isFinite() && durationSeconds > 0) {
-            info[MPMediaItemPropertyPlaybackDuration] = durationSeconds
-        }
-        if (positionSeconds.isFinite() && positionSeconds >= 0) {
-            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = positionSeconds
-        }
-        info[MPNowPlayingInfoPropertyPlaybackRate] = if (isPlaying) 1.0 else 0.0
-        lastIsPlaying = isPlaying
         nowPlayingInfoCenter.nowPlayingInfo = info
     }
 
     fun clear() {
-        lastIsPlaying = false
         nowPlayingInfoCenter.nowPlayingInfo = null
         notificationTokens.forEach { notificationCenter.removeObserver(it) }
         notificationTokens.clear()
@@ -135,50 +131,42 @@ internal class IosMediaSession {
     }
 
     private fun registerAudioSessionNotifications() {
-        notificationTokens += notificationCenter.addObserverForName(
+        notificationCenter.addObserverForName(
             name = platform.AVFAudio.AVAudioSessionInterruptionNotification,
             `object` = audioSession,
-            queue = NSOperationQueue.mainQueue()
-        ) { notification ->
-            val type = (notification?.userInfo?.get(
-                platform.AVFAudio.AVAudioSessionInterruptionTypeKey
-            ) as? Number)?.toLong()?.toULong()
-            if (type == platform.AVFAudio.AVAudioSessionInterruptionTypeBegan) {
+            queue = NSOperationQueue.mainQueue()) { notification ->
+            val type = notification?.userInfo?.get(
+                platform.AVFAudio.AVAudioSessionInterruptionTypeKey) as? NSNumber
+            if (type?.unsignedLongValue == platform.AVFAudio.AVAudioSessionInterruptionTypeBegan) {
                 onPause?.invoke()
-            } else if (type == platform.AVFAudio.AVAudioSessionInterruptionTypeEnded) {
+            } else if (type?.unsignedLongValue == platform.AVFAudio.AVAudioSessionInterruptionTypeEnded) {
                 activate()
-                val options = (notification?.userInfo?.get(
-                    platform.AVFAudio.AVAudioSessionInterruptionOptionKey
-                ) as? Number)?.toLong()?.toULong() ?: 0uL
-                val shouldResume = (options and
-                    platform.AVFAudio.AVAudioSessionInterruptionOptionShouldResume) != 0uL
+                val options = notification?.userInfo?.get(
+                    platform.AVFAudio.AVAudioSessionInterruptionOptionKey) as? NSNumber
+                val shouldResume = options?.unsignedLongValue
+                    ?.and(platform.AVFAudio.AVAudioSessionInterruptionOptionShouldResume)
+                    ?.let { it != 0UL } == true
                 if (shouldResume) onPlay?.invoke()
             }
-        }
+        }?.let { notificationTokens += it }
     }
 
     private fun registerRemoteCommands() {
-        remoteCommandTokens += remoteCommandCenter.playCommand to
-            remoteCommandCenter.playCommand.addTargetWithHandler {
+        fun register(command: MPRemoteCommand, handler: (platform.MediaPlayer.MPRemoteCommandEvent?) -> platform.MediaPlayer.MPRemoteCommandHandlerStatus) {
+            command.addTargetWithHandler(handler)?.let {
+                remoteCommandTokens += command to it
+            }
+        }
+
+        register(remoteCommandCenter.playCommand) {
             onPlay?.invoke()
             MPRemoteCommandHandlerStatusSuccess
         }
-        remoteCommandTokens += remoteCommandCenter.pauseCommand to
-            remoteCommandCenter.pauseCommand.addTargetWithHandler {
+        register(remoteCommandCenter.pauseCommand) {
             onPause?.invoke()
             MPRemoteCommandHandlerStatusSuccess
         }
-        remoteCommandTokens += remoteCommandCenter.togglePlayPauseCommand to
-            remoteCommandCenter.togglePlayPauseCommand.addTargetWithHandler {
-            if (lastIsPlaying) {
-                onPause?.invoke()
-            } else {
-                onPlay?.invoke()
-            }
-            MPRemoteCommandHandlerStatusSuccess
-        }
-        remoteCommandTokens += remoteCommandCenter.changePlaybackPositionCommand to
-            remoteCommandCenter.changePlaybackPositionCommand.addTargetWithHandler { event ->
+        register(remoteCommandCenter.changePlaybackPositionCommand) { event ->
             val position = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime
             if (position != null && position.isFinite() && position >= 0) {
                 onSeek?.invoke(position)
@@ -187,13 +175,11 @@ internal class IosMediaSession {
                 MPRemoteCommandHandlerStatusCommandFailed
             }
         }
-        remoteCommandTokens += remoteCommandCenter.nextTrackCommand to
-            remoteCommandCenter.nextTrackCommand.addTargetWithHandler {
+        register(remoteCommandCenter.nextTrackCommand) {
             onNext?.invoke()
             MPRemoteCommandHandlerStatusSuccess
         }
-        remoteCommandTokens += remoteCommandCenter.previousTrackCommand to
-            remoteCommandCenter.previousTrackCommand.addTargetWithHandler {
+        register(remoteCommandCenter.previousTrackCommand) {
             onPrevious?.invoke()
             MPRemoteCommandHandlerStatusSuccess
         }

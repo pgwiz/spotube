@@ -50,9 +50,9 @@ val bundleId = "org.spotube.spotube"
 val version = "6.0.0"
 // Set to N to release <version>-beta.N (same app id, icons and name as stable); null for a plain stable release.
 // Installer metadata (packageVersion) must stay numeric, so it keeps using plain `version`.
-val betaNumber: Int? = 0
+val betaNumber: Int? = null
 // Betas share the stable app id, so bump this for every beta: Android only updates to a higher versionCode.
-val buildNumber = 46
+val buildNumber = 47
 // Desktop icon channel; Android picks its icons via the stable/nightly product flavor. Use -Pnightly=true.
 val isNightly = providers.gradleProperty("nightly").map { it.toBoolean() }.getOrElse(false)
 val desktopIconDir = if (isNightly) "icons/nightly" else "icons/stable"
@@ -85,27 +85,30 @@ tasks.register("printVersion") {
 
 // Package manager manifests: packaging/<target> rendered into build/packaging/<target> with the version, the
 // release assets' checksums (-PpackagingArtifactsDir=<dir>) and the git-cliff changelog. See RenderPackagingTask.
+// -PpackagingVersion=<x.y.z> packages an already tagged release from a newer checkout (the publish workflow).
+val packagingVersion = providers.gradleProperty("packagingVersion").getOrElse(appVersionName)
 val gitCliffContext = tasks.register<GitCliffContextTask>("gitCliffContext") {
     configFile.set(rootProject.layout.projectDirectory.file("cliff.toml"))
     repositoryDir.set(rootProject.layout.projectDirectory)
     // Nightlies are not a release: their commits stay unreleased
-    if (!isNightly) tag.set("v$appVersionName")
+    if (!isNightly) tag.set("v$packagingVersion")
     outputFile.set(layout.buildDirectory.file("packaging/changelog-context.json"))
 }
 val packagingRootDir = rootProject.layout.projectDirectory
 val packagingArtifactsDir = packagingRootDir.dir(providers.gradleProperty("packagingArtifactsDir"))
-listOf("linux", "aur", "flatpak", "winget", "chocolatey").forEach { target ->
+listOf("linux", "aur", "flatpak", "winget", "chocolatey", "homebrew").forEach { target ->
     tasks.register<RenderPackagingTask>("renderPackaging${target.replaceFirstChar { it.uppercase() }}") {
         description = "Renders packaging/$target into build/packaging/$target."
         templateDir.set(packagingRootDir.dir("packaging/$target"))
-        version.set(appVersionName)
+        version.set(packagingVersion)
         pkgrel.set(providers.gradleProperty("pkgrel").orElse("1"))
         repositoryUrl.set(appRepositoryUrl)
         artifactNames.set(
             mapOf(
-                "linuxX86_64" to "spotube-linux-$appVersionName-x86_64.tar.xz",
-                "linuxAarch64" to "spotube-linux-$appVersionName-aarch64.tar.xz",
+                "linuxX86_64" to "spotube-linux-$packagingVersion-x86_64.tar.xz",
+                "linuxAarch64" to "spotube-linux-$packagingVersion-aarch64.tar.xz",
                 "windowsX64" to "Spotube-windows-x86_64-setup.exe",
+                "macosArm64" to "Spotube-macos-apple-silicon.dmg",
             )
         )
         artifactsDir.set(packagingArtifactsDir)
@@ -114,7 +117,8 @@ listOf("linux", "aur", "flatpak", "winget", "chocolatey").forEach { target ->
     }
 }
 val githubRepositoryPath = repositoryUrl.removePrefix("https://github.com/")
-val latestReleaseApiUrl = "https://api.github.com/repos/$githubRepositoryPath/releases/latest"
+// Full list (not releases/latest) so pre-release installs can be offered newer pre-releases.
+val releasesApiUrl = "https://api.github.com/repos/$githubRepositoryPath/releases?per_page=50"
 val generatedAppInfoDir = layout.buildDirectory.dir("generated/appBuildInfo/commonMain/kotlin")
 val generateAppBuildInfo by tasks.registering(Copy::class) {
     description = "Generate AppBuildInfo.kt"
@@ -126,7 +130,7 @@ val generateAppBuildInfo by tasks.registering(Copy::class) {
             "appVersion" to appVersionName,
             "appBuildNumber" to appBuildNumber,
             "repositoryUrl" to appRepositoryUrl,
-            "latestReleaseApiUrl" to latestReleaseApiUrl,
+            "releasesApiUrl" to releasesApiUrl,
         )
     )
     inputs.properties(
@@ -134,7 +138,7 @@ val generateAppBuildInfo by tasks.registering(Copy::class) {
             "appVersion" to appVersionName,
             "appBuildNumber" to appBuildNumber,
             "repositoryUrl" to appRepositoryUrl,
-            "latestReleaseApiUrl" to latestReleaseApiUrl,
+            "releasesApiUrl" to releasesApiUrl,
         )
     )
 }
@@ -289,12 +293,6 @@ kotlin {
                 // DLNA
                 implementation(libs.dns.sd.kt)
 
-                // mqtt client for jam-session
-                implementation(libs.mqtt.client)
-                implementation(libs.mqtt.x.models)
-                implementation(libs.mqtt.buffer)
-                implementation(libs.mqtt.buffer.codec)
-
                 // Markdown renderer
                 implementation(libs.multiplatform.markdown.renderer)
                 implementation(libs.multiplatform.markdown.renderer.m3)
@@ -443,14 +441,6 @@ android {
 
 }
 
-// ditchoom's socket-quic-quiche ships libquiche_jni.so with 4 KB LOAD segment alignment
-// (not 16 KB compatible), even in the latest release. It is only an optional QUIC transport
-// pulled in transitively by mqtt-client, so drop it on Android until upstream fixes it.
-configurations.matching { it.name.startsWith("debug") || it.name.startsWith("release") }.configureEach {
-    exclude(group = "com.ditchoom", module = "socket-quic-quiche")
-    exclude(group = "com.ditchoom", module = "socket-quic-quiche-android")
-}
-
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
     debugImplementation(libs.compose.uiTooling)
@@ -463,7 +453,7 @@ nucleus.application {
         "--enable-native-access=ALL-UNNAMED", // need for JNA for compose-webview (wry) to work
         // --- ADD THESE FOR SPEED & LOW RAM ---
         "-Xms64m",                  // Start with a tiny heap (prevents grabbing 500MB upfront)
-        "-Xmx384m",                 // Cap the max heap (VLC and WebView need a bit of room)
+        "-Xmx1g",                   // Ceiling, not a reservation: the heap only grows to what is live (#3200, #3193)
         "-XX:TieredStopAtLevel=1",  // Disables the heavy C2 compiler. Huge startup speedup!
         "-XX:+UseSerialGC"          // The Serial GC is the most efficient for heaps under 512MB
     )
@@ -570,7 +560,7 @@ nucleus.application {
         // ProGuard is not used for native images; -Os is the size equivalent
         optimization = NativeImageOptimization.SIZE
         // Same ceiling as the JVM distribution's -Xmx
-        maxHeapSize = "384m"
+        maxHeapSize = "1g"
         // Skiko is loaded from lib/ next to the binary (Nucleus copies it there); don't embed
         // a second ~30 MB copy as a resource
         buildArgs.add("-H:+UnlockExperimentalVMOptions")
