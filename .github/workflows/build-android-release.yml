@@ -49,13 +49,8 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
 
       - name: Configure Gradle wrapper mirrors fallback
         run: |
@@ -132,18 +127,18 @@ jobs:
           for attempt in 1 2 3; do
             echo "Assemble attempt $attempt..."
             if [ "${{ inputs.channel }}" = "nightly" ]; then
-              if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --no-parallel --stacktrace; then
+              if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --max-workers=1 --stacktrace; then
                 success="true"
                 break
               fi
             else
-              if ./gradlew :composeApp:assembleStableRelease --no-parallel --stacktrace; then
+              if ./gradlew :composeApp:assembleStableRelease --max-workers=1 --stacktrace; then
                 success="true"
                 break
               fi
             fi
             echo "Attempt $attempt failed, cleaning target and retrying in 10s..."
-            rm -rf composeApp/target/release/build
+            rm -rf composeApp/target
             sleep 10
           done
           if [ "$success" != "true" ]; then

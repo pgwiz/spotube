@@ -665,6 +665,20 @@ RustAndroidTarget.entries.forEach { target ->
     }
 }
 
+// Cargo build tasks share composeApp/target and race on host proc-macro build scripts if executed concurrently.
+// Ensure they always run sequentially to prevent java.io.FileNotFoundException in target/release/build.
+val androidTargets = listOf("Arm64", "ArmV7", "X64", "X86")
+val variants = listOf("Release", "Debug")
+for (variant in variants) {
+    for (i in 1 until androidTargets.size) {
+        val prevName = "cargoBuildAndroid${androidTargets[i - 1]}$variant"
+        val currName = "cargoBuildAndroid${androidTargets[i]}$variant"
+        tasks.matching { it.name == currName }.configureEach {
+            mustRunAfter(tasks.matching { it.name == prevName })
+        }
+    }
+}
+
 // Google only ships x86_64 Linux NDK toolchains, so on a Linux arm64 host the Android Rust targets can never
 // link (clang: "Exec format error"). Desktop packaging doesn't need them; Android is built on x86_64 runners.
 run {
