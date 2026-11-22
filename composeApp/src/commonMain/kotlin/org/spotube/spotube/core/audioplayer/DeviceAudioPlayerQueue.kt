@@ -42,12 +42,25 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.utils.io.cancel
+import io.ktor.utils.io.readAvailable
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
 import org.koin.core.component.inject
 import org.spotube.spotube.PlatformType
+import org.spotube.spotube.core.network.HttpClientFactory
+import org.spotube.spotube.core.server.RamHeadBufferPool
+import org.spotube.spotube.core.server.StreamInfo
 import org.spotube.spotube.core.server.StreamingUrlRepository
 import org.spotube.spotube.getPlatform
 import kotlin.random.Random
@@ -63,8 +76,19 @@ class DeviceAudioPlayerQueue(
     private val logger by injectLogger<DeviceAudioPlayerQueue>()
     private val streamingUrlRepository by inject<StreamingUrlRepository>()
     private val newPipeService by inject<NewPipeService>()
+    private val httpClientFactory by inject<HttpClientFactory>()
+    private val httpClient: HttpClient by lazy {
+        httpClientFactory.create {
+            install(HttpTimeout) {
+                requestTimeoutMillis = 15_000
+                connectTimeoutMillis = 10_000
+                socketTimeoutMillis = 15_000
+            }
+        }
+    }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var prefetchJob: Job? = null
 
     private val entryByMediaUrl = MutableStateFlow<Map<String, QueueEntry>>(emptyMap())
     private val currentCollectionEntryState = MutableStateFlow<QueueCollectionEntry?>(null)
@@ -122,6 +146,7 @@ class DeviceAudioPlayerQueue(
                 logger.d { "Current media item changed, persisting queue state" }
                 persistQueueStateIfReady()
                 lastPrefetchedTrackId = null
+                cancelOngoingPrefetch()
             }
         }
 
@@ -163,6 +188,8 @@ class DeviceAudioPlayerQueue(
         autoPlay: Boolean,
         startPosition: Int,
         collectionEntry: QueueCollectionEntry?) {
+        cancelOngoingPrefetch()
+        lastPrefetchedTrackId = null
         logger.i { "Loading queue with ${entries.size} entries, autoPlay=$autoPlay, startPosition=$startPosition" }
         val resolved = resolveMediaItems(entries)
         val mediaItems = resolved.map { it.first }
@@ -271,6 +298,8 @@ class DeviceAudioPlayerQueue(
     }
 
     override suspend fun jumpTo(index: Int, autoPlay: Boolean) {
+        cancelOngoingPrefetch()
+        lastPrefetchedTrackId = null
         val queueSize = audioPlayer.playlistFlow.value.size
         if (queueSize == 0) {
             logger.w { "jumpTo called with empty queue" }
@@ -314,6 +343,8 @@ class DeviceAudioPlayerQueue(
     }
 
     override suspend fun clear() {
+        cancelOngoingPrefetch()
+        lastPrefetchedTrackId = null
         logger.i { "Clearing queue and collection history" }
         entryByMediaUrl.value = emptyMap()
         currentCollectionEntryState.value = null
@@ -638,6 +669,16 @@ class DeviceAudioPlayerQueue(
 
     private var lastPrefetchedTrackId: String? = null
 
+    private fun cancelOngoingPrefetch() {
+        prefetchJob?.let { job ->
+            if (job.isActive) {
+                logger.d { "Cancelling ongoing prefetch job for lookahead pre-buffering" }
+                job.cancel()
+            }
+        }
+        prefetchJob = null
+    }
+
     private fun checkAndPrefetchNextTrack(
         currentMedia: MediaItem?,
         position: kotlin.time.Duration,
@@ -647,7 +688,13 @@ class DeviceAudioPlayerQueue(
 
         val progress = position.inWholeMilliseconds.toDouble() / duration.inWholeMilliseconds.toDouble()
         val remainingSec = (duration - position).inWholeSeconds
-        if (progress < 0.70 && remainingSec > 30) return
+
+        // Predictive Lookahead Pre-Buffering trigger:
+        // Trigger at +3s after Track N starts or when progress >= 70% (or <=30s remaining).
+        // Rapid skips (skipping within 3 seconds) return immediately before lookahead prefetching fires.
+        val isWarmupTrigger = position.inWholeMilliseconds >= 3_000L
+        val isProgressTrigger = progress >= 0.70 || remainingSec <= 30
+        if (!isWarmupTrigger && !isProgressTrigger) return
 
         val playlist = audioPlayer.playlistFlow.value
         if (playlist.isEmpty()) return
@@ -668,17 +715,98 @@ class DeviceAudioPlayerQueue(
         if (nextEntry !is QueueEntry.StreamingTrack) return
 
         val nextTrack = nextEntry.track
-        if (lastPrefetchedTrackId == nextTrack.id) return
+
+        // If already prefetched into RamHeadBufferPool or job is actively running for this track, skip
+        if (lastPrefetchedTrackId == nextTrack.id && (RamHeadBufferPool.hasHead(nextTrack.id) || prefetchJob?.isActive == true)) {
+            return
+        }
 
         lastPrefetchedTrackId = nextTrack.id
-        scope.launch {
-            logger.i { "Prefetching stream info for upcoming track: '${nextTrack.title}' (${nextTrack.id})" }
+        cancelOngoingPrefetch()
+
+        prefetchJob = scope.launch {
+            logger.i { "Prefetching stream info & 512KB audio head for upcoming track: '${nextTrack.title}' (${nextTrack.id})" }
             runCatchingNonCancellation {
-                streamingUrlRepository.resolveStreamInfo(nextTrack)
+                val streamInfo = streamingUrlRepository.resolveStreamInfo(nextTrack) ?: run {
+                    logger.d { "Prefetch skipped: unable to resolve stream info for track ${nextTrack.id}" }
+                    return@runCatchingNonCancellation
+                }
+
+                if (RamHeadBufferPool.hasHead(nextTrack.id)) {
+                    logger.d { "Prefetch: 512KB head already cached in RamHeadBufferPool for track ${nextTrack.id}" }
+                    return@runCatchingNonCancellation
+                }
+
+                if (streamInfo.protocol == StreamProtocol.PROGRESSIVE) {
+                    prefetchAudioHead(nextTrack, streamInfo)
+                }
             }.onFailure { e ->
                 logger.d { "Prefetch skipped or failed for track ${nextTrack.id}: ${e.message}" }
             }
         }
+    }
+
+    private suspend fun prefetchAudioHead(nextTrack: MetadataTrack, streamInfo: StreamInfo) {
+        val localUrl = buildStreamingUrl(nextTrack.id, streamInfo.protocol)
+        val candidateUrls = listOfNotNull(
+            localUrl.takeIf { it.isNotBlank() },
+            streamInfo.url.takeIf { it.isNotBlank() && it != localUrl }
+        )
+
+        for (url in candidateUrls) {
+            val success = runCatchingNonCancellation {
+                fetchAndStoreHead(nextTrack.id, url)
+            }.getOrElse { e ->
+                logger.d { "Prefetch head fetch failed from $url for track ${nextTrack.id}: ${e.message}" }
+                false
+            }
+            if (success) {
+                logger.i { "Successfully prefetched 512KB audio head for '${nextTrack.title}' (${nextTrack.id})" }
+                break
+            }
+        }
+    }
+
+    private suspend fun fetchAndStoreHead(trackId: String, url: String): Boolean {
+        val response = httpClient.get(url) {
+            header(HttpHeaders.Range, "bytes=0-${RamHeadBufferPool.HEAD_BUFFER_SIZE - 1}")
+        }
+        if (response.status != HttpStatusCode.PartialContent && response.status != HttpStatusCode.OK) {
+            logger.d { "Prefetch returned unexpected HTTP status ${response.status} for url $url" }
+            return false
+        }
+
+        val channel = response.bodyAsChannel()
+        val buffer = ByteArray(RamHeadBufferPool.HEAD_BUFFER_SIZE)
+        var totalRead = 0
+        try {
+            while (totalRead < RamHeadBufferPool.HEAD_BUFFER_SIZE && !channel.isClosedForRead) {
+                val read = channel.readAvailable(buffer, totalRead, RamHeadBufferPool.HEAD_BUFFER_SIZE - totalRead)
+                if (read <= 0) break
+                totalRead += read
+            }
+        } finally {
+            runCatching { channel.cancel() }
+        }
+
+        if (totalRead <= 0) return false
+
+        val data = if (totalRead == RamHeadBufferPool.HEAD_BUFFER_SIZE) buffer else buffer.copyOf(totalRead)
+        val contentType = response.headers[HttpHeaders.ContentType]
+        val totalLength = response.headers[HttpHeaders.ContentRange]
+            ?.substringAfterLast('/')
+            ?.trim()
+            ?.toLongOrNull()
+            ?: response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+
+        RamHeadBufferPool.putHead(
+            trackId = trackId,
+            data = data,
+            contentType = contentType,
+            totalLength = totalLength,
+            isLookahead = true
+        )
+        return true
     }
 
     private suspend fun QueueEntry.toMediaItem(): MediaItem? {

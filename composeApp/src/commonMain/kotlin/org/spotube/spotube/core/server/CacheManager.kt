@@ -51,7 +51,9 @@ data class CacheEntry(
     val filename: String,
     val sizeBytes: Long,
     val createdAtMs: Long,
-    val contentType: String = "application/octet-stream")
+    val contentType: String = "application/octet-stream",
+    val lastAccessedAtMs: Long = createdAtMs
+)
 
 class CacheManager(
     private val paths: Paths,
@@ -136,7 +138,7 @@ class CacheManager(
             if (!fileSystem.exists(cacheDir)) return
 
             val index = readCacheIndex()
-            val sorted = index.entries.sortedBy { it.createdAtMs }.toMutableList()
+            val sorted = index.entries.sortedBy { it.lastAccessedAtMs }.toMutableList()
 
             var totalSize = sorted.sumOf { it.sizeBytes }
             val limitBytes = limitMB * 1024 * 1024
@@ -154,17 +156,36 @@ class CacheManager(
         }
     }
 
+    suspend fun touchCacheEntry(trackId: String) {
+        cacheMutex.withLock {
+            val index = readCacheIndex()
+            val entryIndex = index.entries.indexOfFirst { it.trackId == trackId }
+            if (entryIndex != -1) {
+                val updatedEntry = index.entries[entryIndex].copy(
+                    lastAccessedAtMs = kotlin.time.Clock.System.now().toEpochMilliseconds()
+                )
+                val updatedList = index.entries.toMutableList().apply {
+                    set(entryIndex, updatedEntry)
+                }
+                writeCacheIndex(index.copy(entries = updatedList))
+            }
+        }
+    }
+
     suspend fun commitCacheEntry(
         trackId: String,
         filename: String,
         sizeBytes: Long,
         contentType: String) {
+        val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
         val entry = CacheEntry(
             trackId = trackId,
             filename = filename,
             sizeBytes = sizeBytes,
-            createdAtMs = kotlin.time.Clock.System.now().toEpochMilliseconds(),
-            contentType = contentType)
+            createdAtMs = now,
+            contentType = contentType,
+            lastAccessedAtMs = now
+        )
         cacheMutex.withLock {
             val index = readCacheIndex()
             writeCacheIndex(CacheIndex(
@@ -174,6 +195,7 @@ class CacheManager(
     }
 
     suspend fun serveCacheHead(call: ApplicationCall, entry: CacheEntry) {
+        touchCacheEntry(entry.trackId)
         call.respond(object : OutgoingContent.NoContent() {
             override val status: HttpStatusCode = HttpStatusCode.OK
             override val headers: Headers = HeadersBuilder().apply {
@@ -187,6 +209,7 @@ class CacheManager(
     }
 
     suspend fun serveCacheGet(call: ApplicationCall, filePath: Path, entry: CacheEntry) {
+        touchCacheEntry(entry.trackId)
         val fileSize = entry.sizeBytes
         val rangeHeader = call.request.headers[HttpHeaders.Range]
 
@@ -254,6 +277,7 @@ internal suspend fun streamFileRange(
             val read = source.read(chunk, 0, minOf(chunk.size.toLong(), remaining).toInt())
             if (read == -1) break
             channel.writeFully(chunk, 0, read)
+            channel.flush()
             remaining -= read
         }
     }

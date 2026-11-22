@@ -81,8 +81,7 @@ class StreamingUrlRepository(
     private val audioPlayerQueue: AudioPlayerQueue,
     private val matchedTracksRepository: TrackSourceRepository,
     private val settingsRepository: UserSettingsSource,
-    private val streamUrlCacheTtlMs: Long = 20.minutes.inWholeMilliseconds,
-    private val platform: PlatformType = currentPlatform) : KoinComponent {
+    private val streamUrlCacheTtlMs: Long = 20.minutes.inWholeMilliseconds) : KoinComponent {
 
     private val logger by injectLogger<StreamingUrlRepository>()
     private val streamUrlCacheMutex = Mutex()

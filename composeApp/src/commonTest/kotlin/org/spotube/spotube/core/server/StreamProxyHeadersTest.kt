@@ -54,4 +54,54 @@ class StreamProxyHeadersTest {
         assertNull(forwarded["Alt-Svc"])
         assertNull(forwarded["Cache-Control"])
     }
+
+    @Test
+    fun `correctly parses content-range header for 206 caching`() {
+        val parsed = parseContentRangeHeader("bytes 0-3523552/3523553")
+        assertEquals(0L, parsed?.start)
+        assertEquals(3523552L, parsed?.end)
+        assertEquals(3523553L, parsed?.totalSize)
+
+        val partial = parseContentRangeHeader("bytes 524288-1048575/3523553")
+        assertEquals(524288L, partial?.start)
+        assertEquals(1048575L, partial?.end)
+        assertEquals(3523553L, partial?.totalSize)
+
+        val unknownTotal = parseContentRangeHeader("bytes 0-1000/*")
+        assertEquals(0L, unknownTotal?.start)
+        assertEquals(1000L, unknownTotal?.end)
+        assertNull(unknownTotal?.totalSize)
+
+        assertNull(parseContentRangeHeader("invalid-header"))
+    }
+
+    @Test
+    fun `RamHeadBufferPool correctly stores and retrieves 512KB head buffer`() {
+        RamHeadBufferPool.clear()
+        val trackId = "track_test_1"
+        val sampleData = ByteArray(1024) { (it % 128).toByte() }
+
+        RamHeadBufferPool.putHead(
+            trackId = trackId,
+            data = sampleData,
+            contentType = "audio/webm",
+            totalLength = 5000000L,
+            isLookahead = false
+        )
+
+        assertEquals(true, RamHeadBufferPool.hasHead(trackId))
+        val retrieved = RamHeadBufferPool.getHead(trackId)
+        assertEquals(sampleData.size, retrieved?.size)
+        assertEquals(sampleData[0], retrieved?.get(0))
+        assertEquals(sampleData[1023], retrieved?.get(1023))
+
+        val info = RamHeadBufferPool.getHeadInfo(trackId)
+        assertEquals(trackId, info?.trackId)
+        assertEquals("audio/webm", info?.contentType)
+        assertEquals(5000000L, info?.totalLength)
+
+        RamHeadBufferPool.evict(trackId)
+        assertEquals(false, RamHeadBufferPool.hasHead(trackId))
+        assertNull(RamHeadBufferPool.getHead(trackId))
+    }
 }

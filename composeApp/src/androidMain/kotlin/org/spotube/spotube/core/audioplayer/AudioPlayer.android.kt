@@ -26,6 +26,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import org.spotube.spotube.media.PlaybackService
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +67,20 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
         }
     }
 
+    private val customLoadControl = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(
+            15_000,
+            60_000,
+            500,
+            1_000
+        )
+        .setBackBuffer(
+            30_000,
+            true
+        )
+        .setPrioritizeTimeOverSizeThresholds(true)
+        .build()
+
     private val exoPlayer: ExoPlayer = ExoPlayer.Builder(appContext)
         .setAudioAttributes(
             AudioAttributes.Builder()
@@ -74,6 +89,7 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
                 .build(),
             true
         )
+        .setLoadControl(customLoadControl)
         .setHandleAudioBecomingNoisy(true)
         .build()
 

@@ -110,6 +110,7 @@ internal class StreamProxy(
                 "connection=${call.request.headers[HttpHeaders.Connection]} caching=${isCachingEnabled()}"
         }
 
+        // 1. Check persistent LRU disk cache
         if (isCachingEnabled()) {
             val cachedEntry = cacheManager.findCachedEntry(trackId)
             if (cachedEntry != null) {
@@ -122,50 +123,26 @@ internal class StreamProxy(
                 }
                 return
             }
-
-            val isFirstRequest = streamingMutex.withLock {
-                if (trackId in streamingInProgress) {
-                    false
-                } else {
-                    streamingInProgress.add(trackId)
-                    true
-                }
-            }
-
-            if (!isFirstRequest) {
-                logger.d { "Track $trackId is being cached, waiting for cache" }
-                var waited = 0
-                while (waited < 30) {
-                    delay(200.milliseconds)
-                    waited++
-                    val entry = cacheManager.findCachedEntry(trackId)
-                    if (entry != null) {
-                        val (filePath, e) = entry
-                        logger.d { "Track $trackId became available from cache" }
-                        when (requestMethod) {
-                            HttpMethod.Head -> cacheManager.serveCacheHead(call, e)
-                            HttpMethod.Get -> cacheManager.serveCacheGet(call, filePath, e)
-                            else -> call.respond(HttpStatusCode.MethodNotAllowed)
-                        }
-                        return
-                    }
-                    // The caching request ended without committing (player disconnected or the
-                    // source was switched); nothing left to wait for.
-                    if (streamingMutex.withLock { trackId !in streamingInProgress }) break
-                }
-                logger.d { "No cache for track $trackId after waiting, falling through to upstream" }
-            }
-
-            try {
-                doStreamFromUpstream(call, trackId, requestMethod)
-            } finally {
-                if (isFirstRequest) {
-                    streamingMutex.withLock { streamingInProgress.remove(trackId) }
-                }
-            }
-            return
         }
 
+        // 2. Check Tier 1 RAM Head Buffer for instant startup (<2ms TTFB)
+        val rangeHeader = call.request.headers[HttpHeaders.Range]
+        val isRequestFromByte0 = rangeHeader == null || rangeHeader.startsWith("bytes=0-") || rangeHeader == "bytes=0-"
+        if (requestMethod == HttpMethod.Get && isRequestFromByte0 && RamHeadBufferPool.hasHead(trackId)) {
+            logger.d { "Serving track $trackId via RAM head buffer splicing" }
+            val spliced = runCatching { handleSplicedStream(call, trackId) }.getOrElse { throwable ->
+                if (throwable is CancellationException) throw throwable
+                if (throwable.isClientDisconnect()) {
+                    logger.i(throwable) { "Player disconnected during spliced playback for $trackId" }
+                    return
+                }
+                logger.w(throwable) { "Spliced playback failed for $trackId, falling back to upstream" }
+                false
+            }
+            if (spliced) return
+        }
+
+        // 3. Fall through to non-blocking upstream streaming
         doStreamFromUpstream(call, trackId, requestMethod)
     }
 
@@ -396,6 +373,207 @@ internal class StreamProxy(
         }
     }
 
+    private suspend fun handleSplicedStream(call: ApplicationCall, trackId: String): Boolean {
+        val headData = RamHeadBufferPool.getHead(trackId) ?: return false
+        val headInfo = RamHeadBufferPool.getHeadInfo(trackId)
+        val headLength = headData.size
+        if (headLength == 0) return false
+
+        // Check if player requested a sub-range that fits entirely within the head
+        val requestRange = call.request.headers[HttpHeaders.Range]
+        if (requestRange != null) {
+            val rangeMatch = Regex("""bytes=(\d+)-(\d*)""").find(requestRange)
+            if (rangeMatch != null) {
+                val start = rangeMatch.groupValues[1].toLongOrNull() ?: 0L
+                val endStr = rangeMatch.groupValues[2]
+                val end = if (endStr.isNotEmpty()) endStr.toLongOrNull() else null
+                if (start == 0L && end != null && end < headLength) {
+                    val subLen = (end - start + 1).toInt()
+                    val totalStr = headInfo?.totalLength?.toString() ?: "*"
+                    val cType = headInfo?.contentType ?: "audio/webm"
+                    call.respond(object : OutgoingContent.WriteChannelContent() {
+                        override val status: HttpStatusCode = HttpStatusCode.PartialContent
+                        override val contentLength: Long = subLen.toLong()
+                        override val contentType: ContentType = ContentType.parse(cType)
+                        override val headers: Headers = HeadersBuilder().apply {
+                            append(HttpHeaders.ContentRange, "bytes 0-$end/$totalStr")
+                            append(HttpHeaders.AcceptRanges, "bytes")
+                            append(HttpHeaders.ContentType, cType)
+                        }.build()
+                        override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
+                            channel.writeFully(headData, 0, subLen)
+                            channel.flush()
+                        }
+                    })
+                    return true
+                }
+            }
+        }
+
+        val streamInfo = streamingUrlRepository.resolveStreamInfo(trackId) ?: return false
+        if (streamInfo.protocol != StreamProtocol.PROGRESSIVE) return false
+
+        var currentUrl = streamInfo.url
+        val continuationStart = headLength.toLong()
+        var attemptedRefresh = false
+
+        while (true) {
+            var retryUrl: String? = null
+            var handled = false
+
+            val failure = runCatching {
+                httpClient.prepareRequest(currentUrl) {
+                    method = HttpMethod.Get
+                    applyUpstreamHeaders(call, this, currentUrl, includeRange = false)
+                    headers[HttpHeaders.Range] = "bytes=$continuationStart-"
+                }.execute { response ->
+                    if (response.status.value >= 400) {
+                        logger.w { "Upstream continuation request failed for track $trackId with status ${response.status.value}" }
+                        streamingUrlRepository.invalidateCachedStreamUrl(trackId, currentUrl)
+                        if (!attemptedRefresh) {
+                            val refreshedUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true)?.url
+                            if (!refreshedUrl.isNullOrBlank() && refreshedUrl != currentUrl) {
+                                retryUrl = refreshedUrl
+                                return@execute
+                            }
+                        }
+                        return@execute
+                    }
+
+                    respondWithSplicedStream(call, response, trackId, headData, continuationStart, headInfo)
+                    handled = true
+                }
+            }.exceptionOrNull()
+
+            if (handled) return true
+
+            if (failure != null) {
+                if (failure is CancellationException) throw failure
+                if (failure.isClientDisconnect()) {
+                    logger.i(failure) { "Player disconnected during spliced stream for track $trackId" }
+                    return true
+                }
+                logger.w(failure) { "Failed to fetch spliced continuation stream for $trackId" }
+                return false
+            }
+
+            val next = retryUrl ?: return false
+            currentUrl = next
+            attemptedRefresh = true
+        }
+    }
+
+    private suspend fun respondWithSplicedStream(
+        call: ApplicationCall,
+        upstream: HttpResponse,
+        trackId: String,
+        headData: ByteArray,
+        continuationStart: Long,
+        headInfo: RamHeadBufferPool.HeadInfo?
+    ) {
+        val upstreamHeaders = upstreamHeadersToForward(upstream)
+        val contentRangeHeader = upstreamHeaders[HttpHeaders.ContentRange]
+        val parsedRange = contentRangeHeader?.let { parseContentRangeHeader(it) }
+        val totalLength: Long? = parsedRange?.totalSize ?: headInfo?.totalLength
+        val downstreamLength = totalLength ?: (continuationStart + (upstreamHeaders[HttpHeaders.ContentLength]?.toLongOrNull() ?: 0L))
+        val downstreamContentType = upstreamHeaders[HttpHeaders.ContentType] ?: headInfo?.contentType ?: "application/octet-stream"
+        val requestRange = call.request.headers[HttpHeaders.Range]
+        val responseStatus = if (requestRange != null) HttpStatusCode.PartialContent else HttpStatusCode.OK
+        val downstreamContentRange = if (totalLength != null) "bytes 0-${totalLength - 1}/$totalLength" else "bytes 0-${downstreamLength - 1}/*"
+
+        val downstreamHeaders = HeadersBuilder().apply {
+            append(HttpHeaders.ContentType, downstreamContentType)
+            append(HttpHeaders.ContentLength, downstreamLength.toString())
+            if (responseStatus == HttpStatusCode.PartialContent) {
+                append(HttpHeaders.ContentRange, downstreamContentRange)
+            }
+            append(HttpHeaders.AcceptRanges, "bytes")
+            upstreamHeaders[HttpHeaders.ETag]?.let { append(HttpHeaders.ETag, it) }
+            upstreamHeaders[HttpHeaders.LastModified]?.let { append(HttpHeaders.LastModified, it) }
+        }.build()
+
+        val shouldCache = isCachingEnabled() && streamingMutex.withLock {
+            if (trackId in streamingInProgress) false else {
+                streamingInProgress.add(trackId)
+                true
+            }
+        }
+        val cacheTrack = if (shouldCache) getTrackMetadata(trackId) else null
+        val cacheFilename = if (cacheTrack != null) cacheManager.resolveCacheFilename(cacheTrack, downstreamContentType) else null
+
+        call.respond(object : OutgoingContent.WriteChannelContent() {
+            override val status: HttpStatusCode = responseStatus
+            override val headers: Headers = downstreamHeaders
+            override val contentLength: Long = downstreamLength
+            override val contentType: ContentType = ContentType.parse(downstreamContentType)
+
+            override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
+                val writeStart = TimeSource.Monotonic.markNow()
+                logger.i { "[Req] start writing spliced body for $trackId status=$responseStatus cache=${cacheFilename != null} totalLength=$downstreamLength" }
+
+                var cacheFile: okio.Path? = null
+                var cacheSink: okio.BufferedSink? = null
+                var totalBytesWritten = 0L
+                var completed = false
+
+                if (cacheFilename != null) {
+                    val cacheDir = cacheManager.resolveCacheDir()
+                    fileSystem.createDirectories(cacheDir)
+                    cacheFile = cacheDir / cacheFilename.toPath()
+                    cacheSink = fileSystem.sink(cacheFile).buffer()
+                }
+
+                try {
+                    // 1. Immediately splice the first 512KB from RAM to the player socket
+                    channel.writeFully(headData, 0, headData.size)
+                    channel.flush()
+                    totalBytesWritten += headData.size
+                    cacheSink?.write(headData, 0, headData.size)
+                    logger.i { "[Req] Spliced ${headData.size} bytes from RAM to player in ${writeStart.elapsedNow()} for $trackId" }
+
+                    // 2. Seamlessly continue upstream from byte 524288 in the exact same channel write loop
+                    val upstreamSource = upstream.bodyAsChannel()
+                    val buffer = ByteArray(STREAM_CHUNK_BYTES)
+                    while (true) {
+                        val read = upstreamSource.readAvailable(buffer, 0, buffer.size)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        channel.writeFully(buffer, 0, read)
+                        channel.flush()
+                        cacheSink?.write(buffer, 0, read)
+                        totalBytesWritten += read
+                    }
+
+                    if (cacheSink != null) {
+                        cacheSink.flush()
+                        cacheSink.close()
+                        cacheSink = null
+                    }
+
+                    completed = (totalBytesWritten == downstreamLength)
+                    if (completed && cacheFilename != null) {
+                        cacheManager.commitCacheEntry(
+                            trackId = trackId,
+                            filename = cacheFilename,
+                            sizeBytes = totalBytesWritten,
+                            contentType = downstreamContentType
+                        )
+                        scope.launch { cacheManager.evictIfNeeded() }
+                        logger.i { "[Req] Cached spliced track $trackId ($totalBytesWritten bytes)" }
+                    }
+                } finally {
+                    cacheSink?.runCatching { close() }
+                    if (shouldCache) {
+                        streamingMutex.withLock { streamingInProgress.remove(trackId) }
+                    }
+                    if (!completed && cacheFile != null && fileSystem.exists(cacheFile)) {
+                        fileSystem.delete(cacheFile)
+                    }
+                }
+            }
+        })
+    }
+
     private suspend fun respondWithUpstream(
         call: ApplicationCall,
         upstream: HttpResponse,
@@ -435,17 +613,31 @@ internal class StreamProxy(
             return
         }
 
-        // Only a full 200 response can be cached; 206 partial responses must not be stored as the whole track
-        val doCache = requestMethod == HttpMethod.Get && isCachingEnabled() &&
-                upstream.status == HttpStatusCode.OK
-        val cacheTrack = if (doCache) getTrackMetadata(trackId) else null
+        // Support caching of both 200 OK and 206 Partial Content starting from byte 0
+        val contentRangeHeader = downstreamHeaders[HttpHeaders.ContentRange]
+        val parsedRange = contentRangeHeader?.let { parseContentRangeHeader(it) }
+        val isFullRange206 = upstream.status == HttpStatusCode.PartialContent &&
+                parsedRange != null && parsedRange.start == 0L &&
+                (parsedRange.totalSize == null || parsedRange.end + 1 == parsedRange.totalSize)
+
+        val isCacheableStatus = upstream.status == HttpStatusCode.OK || isFullRange206
+        val expectedLength = if (isFullRange206) (parsedRange?.totalSize ?: downstreamContentLength) else downstreamContentLength
+
+        val shouldCache = requestMethod == HttpMethod.Get && isCachingEnabled() && isCacheableStatus && streamingMutex.withLock {
+            if (trackId in streamingInProgress) {
+                false
+            } else {
+                streamingInProgress.add(trackId)
+                true
+            }
+        }
+        val cacheTrack = if (shouldCache) getTrackMetadata(trackId) else null
         val cacheFilename = if (cacheTrack != null) {
             cacheManager.resolveCacheFilename(cacheTrack, downstreamHeaders[HttpHeaders.ContentType])
         } else {
             null
         }
         val trackIdForCache = trackId
-        val expectedLength = downstreamContentLength
         val cacheContentType = downstreamHeaders[HttpHeaders.ContentType] ?: "application/octet-stream"
 
         call.respond(object : OutgoingContent.WriteChannelContent() {
@@ -468,15 +660,19 @@ internal class StreamProxy(
             }
 
             private suspend fun writeBody(channel: io.ktor.utils.io.ByteWriteChannel) {
-                if (cacheFilename != null) {
-                    val cacheDir = cacheManager.resolveCacheDir()
-                    val cacheFile = cacheDir / cacheFilename.toPath()
-                    fileSystem.createDirectories(cacheDir)
-                    var completed = false
-                    var totalBytes = 0L
-                    try {
+                var completed = false
+                var totalBytes = 0L
+                var cacheFile: okio.Path? = null
+                var headBytesBuffered = 0
+                val headBuffer = ByteArray(RamHeadBufferPool.HEAD_BUFFER_SIZE)
+
+                try {
+                    if (cacheFilename != null) {
+                        val cacheDir = cacheManager.resolveCacheDir()
+                        cacheFile = cacheDir / cacheFilename.toPath()
+                        fileSystem.createDirectories(cacheDir)
                         val source = upstream.bodyAsChannel()
-                        val buffer = ByteArray(256 * 1024)
+                        val buffer = ByteArray(STREAM_CHUNK_BYTES)
                         fileSystem.sink(cacheFile).buffer().use { sink ->
                             while (true) {
                                 val read = source.readAvailable(buffer, 0, buffer.size)
@@ -486,7 +682,14 @@ internal class StreamProxy(
                                 channel.flush()
                                 sink.write(buffer, 0, read)
                                 totalBytes += read
+
+                                if (headBytesBuffered < headBuffer.size) {
+                                    val toCopy = minOf(read, headBuffer.size - headBytesBuffered)
+                                    buffer.copyInto(headBuffer, destinationOffset = headBytesBuffered, startIndex = 0, endIndex = toCopy)
+                                    headBytesBuffered += toCopy
+                                }
                             }
+                            sink.flush()
                         }
                         completed = expectedLength == null || expectedLength == totalBytes
                         if (completed) {
@@ -499,14 +702,41 @@ internal class StreamProxy(
                                 cacheManager.evictIfNeeded()
                             }
                         }
-                    } finally {
-                        // Player disconnected or stream was incomplete: drop the partial file
-                        if (!completed && fileSystem.exists(cacheFile)) {
-                            fileSystem.delete(cacheFile)
+                    } else {
+                        val source = upstream.bodyAsChannel()
+                        val buffer = ByteArray(STREAM_CHUNK_BYTES)
+                        while (true) {
+                            val read = source.readAvailable(buffer, 0, buffer.size)
+                            if (read < 0) break
+                            if (read == 0) continue
+                            channel.writeFully(buffer, 0, read)
+                            channel.flush()
+                            totalBytes += read
+
+                            if (headBytesBuffered < headBuffer.size) {
+                                val toCopy = minOf(read, headBuffer.size - headBytesBuffered)
+                                buffer.copyInto(headBuffer, destinationOffset = headBytesBuffered, startIndex = 0, endIndex = toCopy)
+                                headBytesBuffered += toCopy
+                            }
                         }
                     }
-                } else {
-                    upstream.bodyAsChannel().copyTo(channel)
+
+                    if (headBytesBuffered > 0 && !RamHeadBufferPool.hasHead(trackIdForCache)) {
+                        RamHeadBufferPool.putHead(
+                            trackId = trackIdForCache,
+                            data = headBuffer.copyOf(headBytesBuffered),
+                            contentType = cacheContentType,
+                            totalLength = expectedLength ?: totalBytes
+                        )
+                    }
+                } finally {
+                    if (shouldCache) {
+                        streamingMutex.withLock { streamingInProgress.remove(trackIdForCache) }
+                    }
+                    // Player disconnected or stream was incomplete: drop the partial file
+                    if (!completed && cacheFile != null && fileSystem.exists(cacheFile)) {
+                        fileSystem.delete(cacheFile)
+                    }
                 }
             }
         })
@@ -686,4 +916,22 @@ internal fun Headers.passthroughForPlayer(): Headers {
             upstream.getAll(name)?.forEach { value -> append(name, value) }
         }
     }.build()
+}
+
+private const val STREAM_CHUNK_BYTES = 64 * 1024
+
+internal data class ParsedContentRange(
+    val start: Long,
+    val end: Long,
+    val totalSize: Long?
+)
+
+internal fun parseContentRangeHeader(header: String): ParsedContentRange? {
+    val match = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""", RegexOption.IGNORE_CASE).find(header.trim())
+        ?: return null
+    val start = match.groupValues[1].toLongOrNull() ?: return null
+    val end = match.groupValues[2].toLongOrNull() ?: return null
+    val totalStr = match.groupValues[3]
+    val totalSize = if (totalStr == "*") null else totalStr.toLongOrNull()
+    return ParsedContentRange(start, end, totalSize)
 }
