@@ -132,17 +132,18 @@ jobs:
           for attempt in 1 2 3; do
             echo "Assemble attempt $attempt..."
             if [ "${{ inputs.channel }}" = "nightly" ]; then
-              if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --stacktrace; then
+              if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --no-parallel --stacktrace; then
                 success="true"
                 break
               fi
             else
-              if ./gradlew :composeApp:assembleStableRelease --stacktrace; then
+              if ./gradlew :composeApp:assembleStableRelease --no-parallel --stacktrace; then
                 success="true"
                 break
               fi
             fi
-            echo "Attempt $attempt failed, retrying in 10s..."
+            echo "Attempt $attempt failed, cleaning target and retrying in 10s..."
+            rm -rf composeApp/target/release/build
             sleep 10
           done
           if [ "$success" != "true" ]; then
