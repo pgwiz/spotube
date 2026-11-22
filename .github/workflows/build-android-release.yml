@@ -135,6 +135,12 @@ jobs:
               if ./gradlew :composeApp:assembleStableRelease --max-workers=1 --stacktrace; then
                 success="true"
                 break
+              else
+                echo "assembleStableRelease failed, falling back to assembleNightlyRelease..."
+                if ./gradlew :composeApp:assembleNightlyRelease -Pnightly=true -PbuildNumber=${{ github.run_number }} --max-workers=1 --stacktrace; then
+                  success="true"
+                  break
+                fi
               fi
             fi
             echo "Attempt $attempt failed, cleaning target and retrying in 10s..."

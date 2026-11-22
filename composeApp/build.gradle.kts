@@ -679,6 +679,13 @@ for (variant in variants) {
     }
 }
 
+// Android builds produce JNI shared libraries (.so), not Kotlin/Native static libraries (.a with .def files).
+// Gobley's CargoBuildTask attempts to populate nativeStaticLibsDefFile by scanning Cargo's build script output dir,
+// which can throw java.io.FileNotFoundException on Linux runners. Disable nativeStaticLibsDefFile on Android tasks.
+tasks.matching { it.name.startsWith("cargoBuildAndroid") }.configureEach {
+    (this as? gobley.gradle.cargo.tasks.CargoBuildTask)?.nativeStaticLibsDefFile?.set(null as org.gradle.api.file.RegularFile?)
+}
+
 // Google only ships x86_64 Linux NDK toolchains, so on a Linux arm64 host the Android Rust targets can never
 // link (clang: "Exec format error"). Desktop packaging doesn't need them; Android is built on x86_64 runners.
 run {
