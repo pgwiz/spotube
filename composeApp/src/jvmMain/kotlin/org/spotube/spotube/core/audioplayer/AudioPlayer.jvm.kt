@@ -112,6 +112,9 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
             "--aout=any",
             "--no-osd",
             "--no-snapshot-preview",
+            "--network-caching=200",
+            "--file-caching=200",
+            "--clock-jitter=0",
             *vlcLogArgs
         )
         audioListPlayerComponent = object : AudioListPlayerComponent(mediaPlayerFactory) {

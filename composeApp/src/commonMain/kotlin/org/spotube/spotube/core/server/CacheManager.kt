@@ -29,16 +29,26 @@ import io.ktor.http.content.OutgoingContent
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond
 import io.ktor.utils.io.writeFully
+import kotlinx.atomicfu.AtomicRef
+import kotlinx.atomicfu.atomic
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okio.BufferedSink
 import okio.FileSystem
 import okio.Path
 import okio.Path.Companion.toPath
 import okio.SYSTEM
 import okio.buffer
 import okio.use
+import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 data class CacheIndex(
@@ -57,10 +67,93 @@ data class CacheEntry(
 
 class CacheManager(
     private val paths: Paths,
-    private val settingsRepository: SettingsRepository) {
+    private val settingsRepository: SettingsRepository,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())) {
     private val fileSystem: FileSystem = FileSystem.SYSTEM
     private val cacheMutex: Mutex = Mutex()
     private val json: Json = Json { ignoreUnknownKeys = true }
+    private val cacheIndexRef: AtomicRef<CacheIndex> = atomic(loadCacheIndexFromDisk())
+    private val dirtyWriteBackChannel = Channel<Unit>(Channel.CONFLATED)
+
+    init {
+        scope.launch {
+            for (signal in dirtyWriteBackChannel) {
+                delay(100.milliseconds)
+                persistIndexToDisk()
+            }
+        }
+    }
+
+    interface AsyncSink : AutoCloseable {
+        fun write(bytes: ByteArray, offset: Int, length: Int)
+        suspend fun complete(totalBytesWritten: Long, success: Boolean)
+    }
+
+    fun openAsyncCacheSink(
+        filename: String,
+        trackId: String,
+        contentType: String,
+        expectedLength: Long?
+    ): AsyncSink {
+        val cacheDir = resolveCacheDir()
+        fileSystem.createDirectories(cacheDir)
+        val cacheFile = cacheDir / filename.toPath()
+
+        return object : AsyncSink {
+            // Channel with capacity 64 chunks (up to 4 MB in memory) to absorb slow flash write spikes
+            private val channel = Channel<ByteArray>(capacity = 64)
+            private val writeJob = scope.launch(Dispatchers.IO) {
+                var sink: BufferedSink? = null
+                var writtenBytes = 0L
+                var failed = false
+                try {
+                    sink = fileSystem.sink(cacheFile).buffer()
+                    for (chunk in channel) {
+                        sink.write(chunk)
+                        writtenBytes += chunk.size
+                    }
+                    sink.flush()
+                } catch (e: Throwable) {
+                    failed = true
+                } finally {
+                    sink?.runCatching { close() }
+                    if (failed && fileSystem.exists(cacheFile)) {
+                        runCatching { fileSystem.delete(cacheFile) }
+                    }
+                }
+            }
+
+            override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                if (length <= 0) return
+                val copy = bytes.copyOfRange(offset, offset + length)
+                channel.trySend(copy)
+            }
+
+            override suspend fun complete(totalBytesWritten: Long, success: Boolean) {
+                channel.close()
+                writeJob.join()
+
+                val completed = success && (expectedLength == null || expectedLength == totalBytesWritten)
+                if (completed) {
+                    commitCacheEntry(
+                        trackId = trackId,
+                        filename = filename,
+                        sizeBytes = totalBytesWritten,
+                        contentType = contentType
+                    )
+                    scope.launch { evictIfNeeded() }
+                } else {
+                    if (fileSystem.exists(cacheFile)) {
+                        runCatching { fileSystem.delete(cacheFile) }
+                    }
+                }
+            }
+
+            override fun close() {
+                channel.close()
+            }
+        }
+    }
 
     companion object {
         private val cacheIndexFileName = "cache_index.json".toPath()
@@ -85,26 +178,36 @@ class CacheManager(
 
     private fun getCacheIndexPath(): Path = resolveCacheDir() / cacheIndexFileName
 
-    fun readCacheIndex(): CacheIndex {
-        val indexPath = getCacheIndexPath()
-        if (!fileSystem.exists(indexPath)) return CacheIndex()
+    private fun loadCacheIndexFromDisk(): CacheIndex {
         return runCatching {
+            val indexPath = getCacheIndexPath()
+            if (!fileSystem.exists(indexPath)) return CacheIndex()
             fileSystem.source(indexPath).buffer().use { source ->
                 json.decodeFromString<CacheIndex>(source.readUtf8())
             }
         }.getOrDefault(CacheIndex())
     }
 
-    fun writeCacheIndex(index: CacheIndex) {
+    private fun persistIndexToDisk() {
+        val index = cacheIndexRef.value
         val indexPath = getCacheIndexPath()
-        fileSystem.createDirectories(indexPath.parent ?: resolveCacheDir())
-        fileSystem.sink(indexPath).buffer().use { sink ->
-            sink.writeUtf8(json.encodeToString(index))
+        runCatching {
+            fileSystem.createDirectories(indexPath.parent ?: resolveCacheDir())
+            fileSystem.sink(indexPath).buffer().use { sink ->
+                sink.writeUtf8(json.encodeToString(index))
+            }
         }
     }
 
+    fun readCacheIndex(): CacheIndex = cacheIndexRef.value
+
+    fun writeCacheIndex(index: CacheIndex) {
+        cacheIndexRef.value = index
+        persistIndexToDisk()
+    }
+
     fun findCachedEntry(trackId: String): Pair<Path, CacheEntry>? {
-        val index = readCacheIndex()
+        val index = cacheIndexRef.value
         val entry = index.entries.firstOrNull { it.trackId == trackId } ?: return null
         val filePath = resolveCacheDir() / entry.filename.toPath()
         return if (fileSystem.exists(filePath)) filePath to entry else null
@@ -112,13 +215,18 @@ class CacheManager(
 
     suspend fun invalidateCacheEntry(trackId: String) {
         cacheMutex.withLock {
-            val index = readCacheIndex()
+            val index = cacheIndexRef.value
             val entry = index.entries.firstOrNull { it.trackId == trackId } ?: return
             val filePath = resolveCacheDir() / entry.filename.toPath()
             if (fileSystem.exists(filePath)) {
-                fileSystem.delete(filePath)
+                runCatching { fileSystem.delete(filePath) }
             }
-            writeCacheIndex(index.copy(entries = index.entries.filter { it.trackId != trackId }))
+            while (true) {
+                val cur = cacheIndexRef.value
+                val next = cur.copy(entries = cur.entries.filter { it.trackId != trackId })
+                if (cacheIndexRef.compareAndSet(cur, next)) break
+            }
+            persistIndexToDisk()
         }
     }
 
@@ -137,38 +245,48 @@ class CacheManager(
             val cacheDir = resolveCacheDir()
             if (!fileSystem.exists(cacheDir)) return
 
-            val index = readCacheIndex()
+            val index = cacheIndexRef.value
             val sorted = index.entries.sortedBy { it.lastAccessedAtMs }.toMutableList()
 
             var totalSize = sorted.sumOf { it.sizeBytes }
             val limitBytes = limitMB * 1024 * 1024
+            var evictedAny = false
 
             while (totalSize > limitBytes && sorted.isNotEmpty()) {
                 val entry = sorted.removeFirst()
                 val filePath = cacheDir / entry.filename.toPath()
                 if (fileSystem.exists(filePath)) {
-                    fileSystem.delete(filePath)
+                    runCatching { fileSystem.delete(filePath) }
                 }
                 totalSize -= entry.sizeBytes
+                evictedAny = true
             }
 
-            writeCacheIndex(index.copy(entries = sorted))
+            if (evictedAny) {
+                val next = index.copy(entries = sorted)
+                cacheIndexRef.value = next
+                persistIndexToDisk()
+            }
         }
     }
 
     suspend fun touchCacheEntry(trackId: String) {
-        cacheMutex.withLock {
-            val index = readCacheIndex()
-            val entryIndex = index.entries.indexOfFirst { it.trackId == trackId }
-            if (entryIndex != -1) {
-                val updatedEntry = index.entries[entryIndex].copy(
-                    lastAccessedAtMs = kotlin.time.Clock.System.now().toEpochMilliseconds()
-                )
-                val updatedList = index.entries.toMutableList().apply {
-                    set(entryIndex, updatedEntry)
-                }
-                writeCacheIndex(index.copy(entries = updatedList))
+        val now = kotlin.time.Clock.System.now().toEpochMilliseconds()
+        var updated = false
+        while (true) {
+            val cur = cacheIndexRef.value
+            val entryIndex = cur.entries.indexOfFirst { it.trackId == trackId }
+            if (entryIndex == -1) break
+            val updatedEntry = cur.entries[entryIndex].copy(lastAccessedAtMs = now)
+            val updatedList = cur.entries.toMutableList().apply { set(entryIndex, updatedEntry) }
+            val next = cur.copy(entries = updatedList)
+            if (cacheIndexRef.compareAndSet(cur, next)) {
+                updated = true
+                break
             }
+        }
+        if (updated) {
+            dirtyWriteBackChannel.trySend(Unit)
         }
     }
 
@@ -186,12 +304,12 @@ class CacheManager(
             contentType = contentType,
             lastAccessedAtMs = now
         )
-        cacheMutex.withLock {
-            val index = readCacheIndex()
-            writeCacheIndex(CacheIndex(
-                entries = index.entries.filter { it.trackId != trackId } + entry
-            ))
+        while (true) {
+            val cur = cacheIndexRef.value
+            val next = cur.copy(entries = cur.entries.filter { it.trackId != trackId } + entry)
+            if (cacheIndexRef.compareAndSet(cur, next)) break
         }
+        dirtyWriteBackChannel.trySend(Unit)
     }
 
     suspend fun serveCacheHead(call: ApplicationCall, entry: CacheEntry) {

@@ -104,4 +104,37 @@ class StreamProxyHeadersTest {
         assertEquals(false, RamHeadBufferPool.hasHead(trackId))
         assertNull(RamHeadBufferPool.getHead(trackId))
     }
+
+    @Test
+    fun `isYouTubeOrGoogleVideo correctly identifies Google Video and YouTube URLs`() {
+        assertEquals(true, isYouTubeOrGoogleVideo("https://rr2---sn-4g5edn6s.googlevideo.com/videoplayback?expire=12345"))
+        assertEquals(true, isYouTubeOrGoogleVideo("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+        assertEquals(true, isYouTubeOrGoogleVideo("https://youtu.be/dQw4w9WgXcQ"))
+        assertEquals(false, isYouTubeOrGoogleVideo("https://audio-ak-spotify-com.akamaized.net/audio/12345"))
+        assertEquals(false, isYouTubeOrGoogleVideo("https://example.com/audio.mp3"))
+    }
+
+    @Test
+    fun `CacheManager parseRange handles open-ended, bounded, and invalid byte ranges`() {
+        val totalSize = 10_000_000L
+
+        // bytes=0-
+        val openRange = parseRange("bytes=0-", totalSize)
+        assertEquals(0L, openRange?.first)
+        assertEquals(9_999_999L, openRange?.second)
+
+        // bytes=524288-
+        val continuationRange = parseRange("bytes=524288-", totalSize)
+        assertEquals(524288L, continuationRange?.first)
+        assertEquals(9_999_999L, continuationRange?.second)
+
+        // bytes=0-524287
+        val boundedRange = parseRange("bytes=0-524287", totalSize)
+        assertEquals(0L, boundedRange?.first)
+        assertEquals(524287L, boundedRange?.second)
+
+        // Invalid range
+        assertNull(parseRange("bytes=20000000-", totalSize))
+        assertNull(parseRange("invalid", totalSize))
+    }
 }

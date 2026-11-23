@@ -159,7 +159,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -208,7 +208,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -291,7 +291,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -412,7 +412,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -518,7 +518,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -583,7 +583,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -652,7 +652,7 @@ jobs:
           java-version: 21
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6

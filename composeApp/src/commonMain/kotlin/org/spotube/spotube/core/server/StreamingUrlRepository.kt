@@ -37,10 +37,26 @@ import org.koin.core.component.KoinComponent
 import kotlin.math.abs
 import kotlin.time.Clock
 import io.ktor.http.Url
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import okio.FileSystem
+import okio.Path.Companion.toPath
+import okio.SYSTEM
+import okio.buffer
+import okio.use
+import org.spotube.spotube.core.paths.Paths
 import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+@Serializable
 data class CachedStreamUrl(
     val url: String,
     val protocol: StreamProtocol,
@@ -55,6 +71,11 @@ data class CachedStreamUrl(
     // (e.g. a YouTube video URL) being served after the user switches to a different
     // audio plugin, which would otherwise play back completely unrelated content.
     val pluginId: String)
+
+@Serializable
+data class PersistedStreamUrlStore(
+    val entries: Map<String, CachedStreamUrl> = emptyMap()
+)
 
 private data class CachedAlternatives(
     val pluginId: String,
@@ -81,13 +102,72 @@ class StreamingUrlRepository(
     private val audioPlayerQueue: AudioPlayerQueue,
     private val matchedTracksRepository: TrackSourceRepository,
     private val settingsRepository: UserSettingsSource,
-    private val streamUrlCacheTtlMs: Long = 20.minutes.inWholeMilliseconds) : KoinComponent {
+    private val streamUrlCacheTtlMs: Long = 5.5.hours.inWholeMilliseconds,
+    private val paths: Paths? = null,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())) : KoinComponent {
 
     private val logger by injectLogger<StreamingUrlRepository>()
     private val streamUrlCacheMutex = Mutex()
     private val streamUrlCache = mutableMapOf<String, CachedStreamUrl>()
     private val alternativesCacheMutex = Mutex()
     private val alternativesCache = mutableMapOf<String, CachedAlternatives>()
+    private val fileSystem = FileSystem.SYSTEM
+    private val json = Json { ignoreUnknownKeys = true }
+    private val dirtySaveChannel = Channel<Unit>(Channel.CONFLATED)
+
+    companion object {
+        private const val STREAM_URL_CACHE_FILENAME = "stream_url_cache.json"
+    }
+
+    init {
+        val loaded = loadFromDisk()
+        if (loaded.isNotEmpty()) {
+            streamUrlCache.putAll(loaded)
+            logger.i { "Loaded ${loaded.size} persisted stream URLs from disk cache" }
+        }
+
+        scope.launch {
+            for (signal in dirtySaveChannel) {
+                delay(200.milliseconds)
+                persistToDisk()
+            }
+        }
+    }
+
+    private fun loadFromDisk(): Map<String, CachedStreamUrl> {
+        val basePath = paths?.getApplicationCacheDirPath() ?: return emptyMap()
+        val path = basePath.toPath() / STREAM_URL_CACHE_FILENAME.toPath()
+        if (!fileSystem.exists(path)) return emptyMap()
+        val now = Clock.System.now().toEpochMilliseconds()
+        return runCatching {
+            fileSystem.source(path).buffer().use { source ->
+                json.decodeFromString<PersistedStreamUrlStore>(source.readUtf8()).entries
+                    .filterValues { it.expiresAtMs > now }
+            }
+        }.getOrElse {
+            logger.w(it) { "Failed to load persisted stream url cache from $path" }
+            emptyMap()
+        }
+    }
+
+    private fun persistToDisk() {
+        val basePath = paths?.getApplicationCacheDirPath() ?: return
+        val path = basePath.toPath() / STREAM_URL_CACHE_FILENAME.toPath()
+        val entriesToSave = runCatching {
+            val now = Clock.System.now().toEpochMilliseconds()
+            val entriesSnapshot = streamUrlCache.filterValues { it.expiresAtMs > now }
+            PersistedStreamUrlStore(entriesSnapshot)
+        }.getOrNull() ?: return
+
+        runCatching {
+            fileSystem.createDirectories(path.parent ?: return)
+            fileSystem.sink(path).buffer().use { sink ->
+                sink.writeUtf8(json.encodeToString(entriesToSave))
+            }
+        }.onFailure {
+            logger.w(it) { "Failed to persist stream url cache to $path" }
+        }
+    }
 
     suspend fun resolveStreamInfo(
         trackId: String,
@@ -187,6 +267,7 @@ class StreamingUrlRepository(
             }
 
             logger.d { "Cached source did not provide a stream for track $trackId; falling back to track lookup" }
+            matchedTracksRepository.deleteTrackSource(track, audioPlugin.pluginId)
 
         }
 
@@ -334,6 +415,7 @@ class StreamingUrlRepository(
                 preferredFormat = preferredFormat,
                 preferredQuality = preferredQuality,
                 pluginId = pluginId)
+            dirtySaveChannel.trySend(Unit)
         }
     }
 
@@ -346,7 +428,7 @@ class StreamingUrlRepository(
             val nowMs = Clock.System.now().toEpochMilliseconds()
             val safeExpiryMs = expireEpochMs - 5.minutes.inWholeMilliseconds
             if (safeExpiryMs > nowMs) {
-                val maxExpiryMs = nowMs + 6.hours.inWholeMilliseconds
+                val maxExpiryMs = nowMs + 5.5.hours.inWholeMilliseconds
                 minOf(safeExpiryMs, maxExpiryMs)
             } else {
                 null
@@ -360,6 +442,7 @@ class StreamingUrlRepository(
             if (url == null || cached.url == url) {
                 streamUrlCache.remove(trackId)
                 logger.v { "Invalidated cached stream URL for track $trackId" }
+                dirtySaveChannel.trySend(Unit)
             }
         }
         // Stream metadata is part of the same URL-cache entry and is removed with it.

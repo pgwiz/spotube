@@ -62,6 +62,7 @@ import org.spotube.spotube.core.network.HttpClientFactory
 import org.spotube.spotube.core.server.RamHeadBufferPool
 import org.spotube.spotube.core.server.StreamInfo
 import org.spotube.spotube.core.server.StreamingUrlRepository
+import org.spotube.spotube.core.server.applyStreamClientHeaders
 import org.spotube.spotube.getPlatform
 import kotlin.random.Random
 import kotlin.time.Duration.Companion.milliseconds
@@ -747,32 +748,25 @@ class DeviceAudioPlayerQueue(
     }
 
     private suspend fun prefetchAudioHead(nextTrack: MetadataTrack, streamInfo: StreamInfo) {
-        val localUrl = buildStreamingUrl(nextTrack.id, streamInfo.protocol)
-        val candidateUrls = listOfNotNull(
-            localUrl.takeIf { it.isNotBlank() },
-            streamInfo.url.takeIf { it.isNotBlank() && it != localUrl }
-        )
-
-        for (url in candidateUrls) {
-            val success = runCatchingNonCancellation {
-                fetchAndStoreHead(nextTrack.id, url)
-            }.getOrElse { e ->
-                logger.d { "Prefetch head fetch failed from $url for track ${nextTrack.id}: ${e.message}" }
-                false
-            }
-            if (success) {
-                logger.i { "Successfully prefetched 512KB audio head for '${nextTrack.title}' (${nextTrack.id})" }
-                break
-            }
+        if (streamInfo.url.isBlank()) return
+        val success = runCatchingNonCancellation {
+            fetchAndStoreHeadDirect(nextTrack.id, streamInfo.url)
+        }.getOrElse { e ->
+            logger.d { "Direct prefetch head fetch failed from ${streamInfo.url} for track ${nextTrack.id}: ${e.message}" }
+            false
+        }
+        if (success) {
+            logger.i { "Successfully prefetched 512KB audio head directly for '${nextTrack.title}' (${nextTrack.id})" }
         }
     }
 
-    private suspend fun fetchAndStoreHead(trackId: String, url: String): Boolean {
+    private suspend fun fetchAndStoreHeadDirect(trackId: String, url: String): Boolean {
         val response = httpClient.get(url) {
             header(HttpHeaders.Range, "bytes=0-${RamHeadBufferPool.HEAD_BUFFER_SIZE - 1}")
+            applyStreamClientHeaders(url)
         }
         if (response.status != HttpStatusCode.PartialContent && response.status != HttpStatusCode.OK) {
-            logger.d { "Prefetch returned unexpected HTTP status ${response.status} for url $url" }
+            logger.d { "Direct prefetch returned unexpected HTTP status ${response.status} for url $url" }
             return false
         }
 

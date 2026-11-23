@@ -276,7 +276,8 @@ val sharedModules = module {
             pluginManager = get(),
             audioPlayerQueue = get(),
             matchedTracksRepository = get(),
-            settingsRepository = get())
+            settingsRepository = get(),
+            paths = getOrNull())
     }
     singleOf(::CacheManager)
     singleOf(::AlternativeTracksRepository)

@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Features
+- **playback/caching**: Implement decoupled async RAM head splicing in `StreamProxy` with immediate HTTP 206 Partial Content responses (<2ms TTFB) using cached 512KB RAM buffer in `RamHeadBufferPool` and asynchronous background continuation streaming.
+- **playback/prefetch**: Implement direct speculative pre-fetching in `DeviceAudioPlayerQueue` directly populating `RamHeadBufferPool` from upstream CDN without local proxy loopback contention.
+- **server/StreamingUrlRepository**: Implement persistent 5.5-hour stream URL disk store bound to YouTube URL expiration parameter to eliminate redundant YouTube scraping on replay and app restart.
+- **server/CacheManager**: Implement in-memory atomic cache index with background conflated dirty write-back and non-blocking asynchronous flash write pipeline (`openAsyncCacheSink`).
+- **player/tuning**: Tune audio engine buffering across VLC desktop (`--network-caching=200`, `--file-caching=200`, `--clock-jitter=0`) and iOS VLCKit (`:network-caching=200`, `:file-caching=200`).
+- **ci/build**: Pin Rust toolchain to 1.99.1 across Android release and publication workflows to prevent Cargo 1.100+ build failures.
 - **audioplayer/ios**: Implement `IosMediaSession` with `AVAudioSession`, `MPNowPlayingInfoCenter`, and `MPRemoteCommandCenter` for lock-screen / Control Center media controls and background audio playback (PR #3170).
 - **audioplayer/ios**: Enable direct streaming resolution for iOS playback in `DeviceAudioPlayerQueue.toMediaItem` (PR #3170).
 - **audioplayer/DeviceAudioPlayerQueue**: Implement complete 4-tier endless playback recommendation cascade: metadata recommendations, native YouTube radio mix, album tracks, and artist top tracks (PR #3092, PR #3134).

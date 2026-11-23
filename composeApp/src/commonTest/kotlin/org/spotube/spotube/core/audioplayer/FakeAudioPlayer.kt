@@ -1,8 +1,10 @@
 package org.spotube.spotube.core.audioplayer
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.time.Duration
 
@@ -16,24 +18,29 @@ class FakeAudioPlayer : AudioPlayerInterface {
     private val _positionFlow = MutableStateFlow(Duration.ZERO)
     override val positionFlow: StateFlow<Duration> = _positionFlow.asStateFlow()
 
-    override val bufferingPositionFlow: StateFlow<Duration>
-        get() = TODO("Not yet implemented")
+    private val _bufferingPositionFlow = MutableStateFlow(Duration.ZERO)
+    override val bufferingPositionFlow: StateFlow<Duration> = _bufferingPositionFlow.asStateFlow()
 
     private val _currentMediaItemFlow = MutableStateFlow<MediaItem?>(null)
     override val currentMediaItemFlow: StateFlow<MediaItem?> = _currentMediaItemFlow.asStateFlow()
 
     private val _loopStateFlow = MutableStateFlow(LoopState.NONE)
     override val loopStateFlow: StateFlow<LoopState> = _loopStateFlow.asStateFlow()
-    override val shuffleModeFlow: StateFlow<Boolean>
-        get() = TODO("Not yet implemented")
-    override val playbackSpeedFlow: StateFlow<Float>
-        get() = TODO("Not yet implemented")
-    override val volumeFlow: StateFlow<Float>
-        get() = TODO("Not yet implemented")
-    override val completionFlow: Flow<Unit>
-        get() = TODO("Not yet implemented")
-    override val errorFlow: Flow<Throwable>
-        get() = TODO("Not yet implemented")
+
+    private val _shuffleModeFlow = MutableStateFlow(false)
+    override val shuffleModeFlow: StateFlow<Boolean> = _shuffleModeFlow.asStateFlow()
+
+    private val _playbackSpeedFlow = MutableStateFlow(1f)
+    override val playbackSpeedFlow: StateFlow<Float> = _playbackSpeedFlow.asStateFlow()
+
+    private val _volumeFlow = MutableStateFlow(1f)
+    override val volumeFlow: StateFlow<Float> = _volumeFlow.asStateFlow()
+
+    private val _completionFlow = MutableSharedFlow<Unit>()
+    override val completionFlow: Flow<Unit> = _completionFlow.asSharedFlow()
+
+    private val _errorFlow = MutableSharedFlow<Throwable>()
+    override val errorFlow: Flow<Throwable> = _errorFlow.asSharedFlow()
 
     override suspend fun setVolume(volume: Float) {
         TODO("Not yet implemented")
