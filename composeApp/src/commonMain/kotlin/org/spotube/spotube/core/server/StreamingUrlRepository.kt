@@ -120,22 +120,30 @@ class StreamingUrlRepository(
     }
 
     init {
-        val loaded = loadFromDisk()
-        if (loaded.isNotEmpty()) {
-            streamUrlCache.putAll(loaded)
-            logger.i { "Loaded ${loaded.size} persisted stream URLs from disk cache" }
+        try {
+            val loaded = loadFromDisk()
+            if (loaded.isNotEmpty()) {
+                streamUrlCache.putAll(loaded)
+                logger.i { "Loaded ${loaded.size} persisted stream URLs from disk cache" }
+            }
+        } catch (e: Throwable) {
+            logger.w(e) { "Failed during initial stream url disk cache load" }
         }
 
         scope.launch {
-            for (signal in dirtySaveChannel) {
-                delay(200.milliseconds)
-                persistToDisk()
+            try {
+                for (signal in dirtySaveChannel) {
+                    delay(200.milliseconds)
+                    persistToDisk()
+                }
+            } catch (e: Throwable) {
+                logger.w(e) { "Error in stream url persistence loop" }
             }
         }
     }
 
     private fun loadFromDisk(): Map<String, CachedStreamUrl> {
-        val basePath = paths?.getApplicationCacheDirPath() ?: return emptyMap()
+        val basePath = runCatching { paths?.getApplicationCacheDirPath() }.getOrNull() ?: return emptyMap()
         val path = basePath.toPath() / STREAM_URL_CACHE_FILENAME.toPath()
         if (!fileSystem.exists(path)) return emptyMap()
         val now = Clock.System.now().toEpochMilliseconds()
@@ -151,7 +159,7 @@ class StreamingUrlRepository(
     }
 
     private suspend fun persistToDisk() {
-        val basePath = paths?.getApplicationCacheDirPath() ?: return
+        val basePath = runCatching { paths?.getApplicationCacheDirPath() }.getOrNull() ?: return
         val path = basePath.toPath() / STREAM_URL_CACHE_FILENAME.toPath()
         val now = Clock.System.now().toEpochMilliseconds()
         val entriesSnapshot = streamUrlCacheMutex.withLock {

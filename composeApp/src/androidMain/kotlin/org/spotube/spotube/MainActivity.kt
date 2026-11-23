@@ -19,6 +19,7 @@ package org.spotube.spotube
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -30,23 +31,69 @@ import io.github.vinceglb.filekit.FileKit
 import io.github.vinceglb.filekit.dialogs.init
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
+        try {
+            enableEdgeToEdge()
+        } catch (e: Throwable) {
+            Log.w(TAG, "enableEdgeToEdge failed", e)
+        }
+
         super.onCreate(savedInstanceState)
-        FileKit.init(this)
-        NewPipeDownloader.init(Paths())
+
+        try {
+            FileKit.init(this)
+        } catch (e: Throwable) {
+            Log.e(TAG, "FileKit.init failed", e)
+        }
+
+        try {
+            NewPipeDownloader.init(Paths())
+        } catch (e: Throwable) {
+            Log.e(TAG, "NewPipeDownloader.init failed", e)
+        }
         
-        // Plain start from the foreground; Media3 promotes PlaybackService itself once playback starts
-        startService(Intent(this, PlaybackService::class.java))
+        // Plain start from the foreground; Media3 promotes PlaybackService itself once playback starts.
+        // Catch ForegroundServiceStartNotAllowedException, SecurityException, or any lifecycle restriction.
+        try {
+            startService(Intent(this, PlaybackService::class.java))
+        } catch (e: Throwable) {
+            Log.w(TAG, "startService(PlaybackService) failed or disallowed", e)
+        }
         
-        intent?.dataString?.let(ExternalUriHandler::onNewUri)
-        setContent {
-            App()
+        try {
+            intent?.dataString?.let(ExternalUriHandler::onNewUri)
+        } catch (e: Throwable) {
+            Log.w(TAG, "ExternalUriHandler failed on initial intent", e)
+        }
+
+        try {
+            setContent {
+                App()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Fatal exception during setContent initialization", e)
+            try {
+                val intent = CrashActivity.createIntent(this, buildString {
+                    appendLine("Fatal Compose Error in MainActivity:")
+                    appendLine(e.stackTraceToString())
+                })
+                startActivity(intent)
+            } finally {
+                finish()
+            }
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.dataString?.let(ExternalUriHandler::onNewUri)
+        try {
+            intent.dataString?.let(ExternalUriHandler::onNewUri)
+        } catch (e: Throwable) {
+            Log.w(TAG, "ExternalUriHandler failed on onNewIntent", e)
+        }
     }
 }

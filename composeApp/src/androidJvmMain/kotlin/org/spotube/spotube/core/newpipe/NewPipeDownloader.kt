@@ -108,20 +108,24 @@ class PersistentCookieJar(private val paths: Paths) : CookieJar {
 
     private fun loadCookies() {
         runBlocking {
-            val prefs = dataStore.data.first()
-            val json = prefs[stringPreferencesKey("newpipe_cookies")] ?: return@runBlocking
             try {
-                val serialized: Map<String, List<String>> = Json.decodeFromString(json)
-                serialized.forEach { (host, cookieStrings) ->
-                    cookieStore[host] = cookieStrings.mapNotNull { s ->
-                        runCatching {
-                            Cookie.parse(
-                                HttpUrl.Builder().scheme("https").host(host).build(), s
-                            )
-                        }.getOrNull()
-                    }.toMutableList()
+                val prefs = dataStore.data.first()
+                val json = prefs[stringPreferencesKey("newpipe_cookies")] ?: return@runBlocking
+                try {
+                    val serialized: Map<String, List<String>> = Json.decodeFromString(json)
+                    serialized.forEach { (host, cookieStrings) ->
+                        cookieStore[host] = cookieStrings.mapNotNull { s ->
+                            runCatching {
+                                Cookie.parse(
+                                    HttpUrl.Builder().scheme("https").host(host).build(), s
+                                )
+                            }.getOrNull()
+                        }.toMutableList()
+                    }
+                } catch (e: Exception) {
+                    cookieStore.clear()
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 cookieStore.clear()
             }
         }

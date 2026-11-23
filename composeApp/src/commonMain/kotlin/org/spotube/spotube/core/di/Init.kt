@@ -19,12 +19,20 @@ package org.spotube.spotube.core.di
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.koin.KermitKoinLogger
+import org.koin.core.context.GlobalContext
 import org.koin.core.context.startKoin
 import org.koin.dsl.KoinAppDeclaration
 import org.spotube.spotube.core.logger.AppLogWriter
 
 fun initKoin(configuration: KoinAppDeclaration? = null) {
-    Logger.addLogWriter(AppLogWriter())
+    if (GlobalContext.getOrNull() != null) return
+
+    try {
+        Logger.addLogWriter(AppLogWriter())
+    } catch (_: Throwable) {
+        // AppLogWriter may already be registered
+    }
+
     startKoin {
         configuration?.invoke(this)
         logger(
@@ -35,5 +43,4 @@ fun initKoin(configuration: KoinAppDeclaration? = null) {
             platformModules
         )
     }
-
 }

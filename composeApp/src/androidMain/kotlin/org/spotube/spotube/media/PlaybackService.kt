@@ -22,11 +22,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Process
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.media3.common.MediaItem as Media3MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -112,19 +114,32 @@ class PlaybackService : MediaLibraryService(), KoinComponent {
         // running in-process, just without the notification until the app is
         // foregrounded and the service can start properly.
         try {
-            startForeground(NOTIFICATION_ID, notification)
-        } catch (e: Exception) {
-            Log.w(TAG, "startForeground not allowed; continuing without notification", e)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "startForeground not allowed or failed; continuing without notification", e)
         }
 
-        librarySession =
-            MediaLibrarySession.Builder(this, audioPlayer.player, LibrarySessionCallback())
-                .setSessionActivity(sessionActivity)
-                .build()
+        try {
+            librarySession =
+                MediaLibrarySession.Builder(this, audioPlayer.player, LibrarySessionCallback())
+                    .setSessionActivity(sessionActivity)
+                    .build()
 
-        addSession(librarySession)
+            addSession(librarySession)
 
-        Log.i(TAG, "Library session created")
+            Log.i(TAG, "Library session created")
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to create MediaLibrarySession in PlaybackService", e)
+        }
     }
 
     /**
@@ -156,13 +171,19 @@ class PlaybackService : MediaLibraryService(), KoinComponent {
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession =
-        librarySession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
+        if (::librarySession.isInitialized) librarySession else null
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy")
-        removeSession(librarySession)
-        librarySession.release()
+        if (::librarySession.isInitialized) {
+            try {
+                removeSession(librarySession)
+                librarySession.release()
+            } catch (e: Throwable) {
+                Log.w(TAG, "Failed to release librarySession", e)
+            }
+        }
         super.onDestroy()
         // Swiping the app out of recents should fully close it: Android otherwise keeps this
         // process cached with the proxy server, jam client and every singleton still alive.
