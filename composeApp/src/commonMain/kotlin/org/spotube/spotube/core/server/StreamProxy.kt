@@ -381,53 +381,53 @@ internal class StreamProxy(
         val headLength = headData.size
         if (headLength == 0) return false
 
-        // Check if player requested a sub-range that fits entirely within the head
+        // Parse range header if present
         val requestRange = call.request.headers[HttpHeaders.Range]
-        if (requestRange != null) {
-            val rangeMatch = Regex("""bytes=(\d+)-(\d*)""").find(requestRange)
-            if (rangeMatch != null) {
-                val start = rangeMatch.groupValues[1].toLongOrNull() ?: 0L
-                val endStr = rangeMatch.groupValues[2]
-                val end = if (endStr.isNotEmpty()) endStr.toLongOrNull() else null
-                if (start == 0L && end != null && end < headLength) {
-                    val subLen = (end - start + 1).toInt()
-                    val totalStr = headInfo?.totalLength?.toString() ?: "*"
-                    val cType = headInfo?.contentType ?: "audio/webm"
-                    call.respond(object : OutgoingContent.WriteChannelContent() {
-                        override val status: HttpStatusCode = HttpStatusCode.PartialContent
-                        override val contentLength: Long = subLen.toLong()
-                        override val contentType: ContentType = ContentType.parse(cType)
-                        override val headers: Headers = HeadersBuilder().apply {
-                            append(HttpHeaders.ContentRange, "bytes 0-$end/$totalStr")
-                            append(HttpHeaders.AcceptRanges, "bytes")
-                            append(HttpHeaders.ContentType, cType)
-                        }.build()
-                        override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
-                            channel.writeFully(headData, 0, subLen)
-                            channel.flush()
-                        }
-                    })
-                    return true
-                }
-            }
-        }
+        val rangeMatch = requestRange?.let { Regex("""bytes=(\d+)-(\d*)""").find(it) }
+        val reqStart = rangeMatch?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val reqEnd = rangeMatch?.groupValues?.get(2)?.let { if (it.isNotEmpty()) it.toLongOrNull() else null }
 
-        // Total length from head info is required to immediately emit HTTP 206 Partial Content.
-        // If unknown, fall back to upstream streaming so headers can be resolved.
+        // Splicing from RAM buffer starting at 0 only applies if start is 0
+        if (reqStart != 0L) return false
+
         val totalLength = headInfo?.totalLength ?: return false
         val downstreamContentType = headInfo.contentType ?: "audio/webm"
-        val downstreamLength = totalLength
-        val continuationStart = headLength.toLong()
 
-        val downstreamContentRange = "bytes 0-${totalLength - 1}/$totalLength"
+        // If player requested a sub-range that fits entirely within the head
+        if (reqEnd != null && reqEnd < headLength) {
+            val subLen = (reqEnd - reqStart + 1).toInt()
+            val contentRange = "bytes 0-$reqEnd/$totalLength"
+            call.respond(object : OutgoingContent.WriteChannelContent() {
+                override val status: HttpStatusCode = HttpStatusCode.PartialContent
+                override val contentLength: Long = subLen.toLong()
+                override val contentType: ContentType = ContentType.parse(downstreamContentType)
+                override val headers: Headers = HeadersBuilder().apply {
+                    append(HttpHeaders.ContentRange, contentRange)
+                    append(HttpHeaders.AcceptRanges, "bytes")
+                }.build()
+
+                override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
+                    channel.writeFully(headData, 0, subLen)
+                    channel.flush()
+                }
+            })
+            return true
+        }
+
+        val targetEnd = reqEnd?.coerceAtMost(totalLength - 1) ?: (totalLength - 1)
+        val downstreamLength = targetEnd - reqStart + 1
+        val continuationStart = headLength.toLong()
+        val continuationEnd = targetEnd
+        val downstreamContentRange = "bytes 0-$targetEnd/$totalLength"
+
         val downstreamHeaders = HeadersBuilder().apply {
-            append(HttpHeaders.ContentType, downstreamContentType)
-            append(HttpHeaders.ContentLength, downstreamLength.toString())
             append(HttpHeaders.ContentRange, downstreamContentRange)
             append(HttpHeaders.AcceptRanges, "bytes")
         }.build()
 
-        val shouldCache = isCachingEnabled() && streamingMutex.withLock {
+        // Only cache full track streams (open-ended or ending at totalLength - 1)
+        val isFullTrackRequest = (reqEnd == null || targetEnd == totalLength - 1)
+        val shouldCache = isFullTrackRequest && isCachingEnabled() && streamingMutex.withLock {
             if (trackId in streamingInProgress) false else {
                 streamingInProgress.add(trackId)
                 true
@@ -436,14 +436,14 @@ internal class StreamProxy(
         val cacheTrack = if (shouldCache) getTrackMetadata(trackId) else null
         val cacheFilename = if (cacheTrack != null) cacheManager.resolveCacheFilename(cacheTrack, downstreamContentType) else null
         val asyncCacheSink = if (cacheFilename != null) {
-            cacheManager.openAsyncCacheSink(cacheFilename, trackId, downstreamContentType, downstreamLength)
+            cacheManager.openAsyncCacheSink(cacheFilename, trackId, downstreamContentType, totalLength)
         } else null
 
-        // 1. Concurrently launch upstream continuation fetch for bytes=524288-
+        // 1. Concurrently launch upstream continuation fetch
         val continuationChannel = ByteChannel(autoFlush = true)
         val upstreamJob = scope.launch {
             try {
-                if (continuationStart >= totalLength) {
+                if (continuationStart > continuationEnd) {
                     continuationChannel.close()
                     return@launch
                 }
@@ -463,7 +463,12 @@ internal class StreamProxy(
                         httpClient.prepareRequest(currentUrl) {
                             method = HttpMethod.Get
                             applyUpstreamHeaders(call, this, currentUrl, includeRange = false)
-                            headers[HttpHeaders.Range] = "bytes=$continuationStart-"
+                            val rangeHeaderVal = if (reqEnd != null) {
+                                "bytes=$continuationStart-$continuationEnd"
+                            } else {
+                                "bytes=$continuationStart-"
+                            }
+                            headers[HttpHeaders.Range] = rangeHeaderVal
                         }.execute { response ->
                             if (response.status.value >= 400) {
                                 logger.w { "Upstream continuation failed for $trackId status=${response.status.value}" }
@@ -480,12 +485,26 @@ internal class StreamProxy(
                             }
 
                             val upstreamSource = response.bodyAsChannel()
+                            if (response.status == HttpStatusCode.OK && continuationStart > 0) {
+                                var toDiscard = continuationStart
+                                val discardBuf = ByteArray(STREAM_CHUNK_BYTES)
+                                while (toDiscard > 0 && !upstreamSource.isClosedForRead) {
+                                    val toRead = minOf(toDiscard, discardBuf.size.toLong()).toInt()
+                                    val discarded = upstreamSource.readAvailable(discardBuf, 0, toRead)
+                                    if (discarded < 0) break
+                                    toDiscard -= discarded
+                                }
+                            }
+
+                            var bytesRemaining = if (reqEnd != null) (continuationEnd - continuationStart + 1) else Long.MAX_VALUE
                             val chunk = ByteArray(STREAM_CHUNK_BYTES)
-                            while (true) {
-                                val read = upstreamSource.readAvailable(chunk, 0, chunk.size)
+                            while (bytesRemaining > 0 && !upstreamSource.isClosedForRead) {
+                                val toRead = minOf(chunk.size.toLong(), bytesRemaining).toInt()
+                                val read = upstreamSource.readAvailable(chunk, 0, toRead)
                                 if (read < 0) break
                                 if (read == 0) continue
                                 continuationChannel.writeFully(chunk, 0, read)
+                                bytesRemaining -= read
                             }
                             continuationChannel.close()
                         }
@@ -524,14 +543,15 @@ internal class StreamProxy(
 
                 try {
                     // Step 1: Write 512KB RAM head buffer directly to player socket (<2ms TTFB)
-                    channel.writeFully(headData, 0, headData.size)
+                    val headToWrite = minOf(headLength.toLong(), downstreamLength).toInt()
+                    channel.writeFully(headData, 0, headToWrite)
                     channel.flush()
-                    totalBytesWritten += headData.size
-                    asyncCacheSink?.write(headData, 0, headData.size)
-                    logger.i { "[Req] Spliced ${headData.size} bytes from RAM to player in ${writeStart.elapsedNow()} for $trackId" }
+                    totalBytesWritten += headToWrite
+                    asyncCacheSink?.write(headData, 0, headToWrite)
+                    logger.i { "[Req] Spliced $headToWrite bytes from RAM to player in ${writeStart.elapsedNow()} for $trackId" }
 
                     // Step 2: Stream remaining bytes seamlessly from continuationChannel
-                    if (continuationStart < downstreamLength) {
+                    if (continuationStart <= continuationEnd) {
                         val buffer = ByteArray(STREAM_CHUNK_BYTES)
                         while (!continuationChannel.isClosedForRead) {
                             val read = continuationChannel.readAvailable(buffer, 0, buffer.size)
@@ -542,6 +562,14 @@ internal class StreamProxy(
                             asyncCacheSink?.write(buffer, 0, read)
                             totalBytesWritten += read
                         }
+
+                        continuationChannel.closedCause?.let { cause ->
+                            throw cause
+                        }
+                    }
+
+                    if (totalBytesWritten < downstreamLength) {
+                        throw IOException("Premature end of spliced stream: wrote $totalBytesWritten of $downstreamLength bytes")
                     }
 
                     completed = (totalBytesWritten == downstreamLength)

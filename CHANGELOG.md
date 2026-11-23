@@ -15,6 +15,10 @@
 - **plugin/PluginManager**: Auto-select vacant ability slots on plugin installation and recover fallback providers on plugin removal (PR #3147).
 
 ### Fixes
+- **server/StreamProxy**: Prevent duplicate `Content-Length` and `Content-Type` headers in spliced 206 Partial Content responses that cause VLC player socket disconnections; correctly compute bounded continuation ranges (`bytes=0-N` where $N \ge 512\text{KB}$) and discard duplicated byte prefixes if upstream responds with 200 OK.
+- **server/CacheManager**: Make `AsyncSink.write` suspending to prevent silent dropping of audio chunks under slow flash I/O, and verify write integrity before committing cache entries to prevent corrupt audio caching; strip duplicate headers in `serveCacheHead`.
+- **server/StreamingUrlRepository**: Synchronize cache snapshot under `streamUrlCacheMutex` in `persistToDisk` to prevent `ConcurrentModificationException` during asynchronous disk saves.
+- **audioplayer/DeviceAudioPlayerQueue**: Stream speculative head prefetch using `prepareRequest(...).execute` instead of `client.get(...)` to avoid buffering full audio responses into memory when upstream ignores range headers.
 - **build/android**: Switch `desugar_jdk_libs` to `com.android.tools:desugar_jdk_libs_nio` to resolve Android 9-12 `NoSuchMethodError: java.net.URLEncoder.encode` (PR #3132).
 - **server/StreamProxy**: Harden YouTube/GoogleVideo proxy streaming against HTTP 403 Forbidden by inspecting client parameter `c` (`ANDROID`, `IOS`, `VISIONOS`), injecting matching mobile User-Agents, and stripping both `Origin` and `Referer`/`Referrer` headers on mobile streams (PR #3150).
 - **downloads/DownloadManager**: Prevent HTTP 403 Forbidden on YouTube audio downloads by injecting matching client User-Agents, stripping `Origin` and `Referer`/`Referrer` headers on mobile streams, and failing early on non-success HTTP probe status to prevent corrupt HTML error pages from saving into the media library (PR #3150).

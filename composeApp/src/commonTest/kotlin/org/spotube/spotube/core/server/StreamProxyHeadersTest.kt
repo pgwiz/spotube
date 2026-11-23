@@ -137,4 +137,35 @@ class StreamProxyHeadersTest {
         assertNull(parseRange("bytes=20000000-", totalSize))
         assertNull(parseRange("invalid", totalSize))
     }
+
+    @Test
+    fun `bounded range within head buffer calculates correct sub-length`() {
+        val headLength = 524288
+        val reqStart = 0L
+        val reqEnd = 1024L
+        val totalLength = 5_000_000L
+
+        val subLen = (reqEnd - reqStart + 1).toInt()
+        assertEquals(1025, subLen)
+        val contentRange = "bytes 0-$reqEnd/$totalLength"
+        assertEquals("bytes 0-1024/5000000", contentRange)
+    }
+
+    @Test
+    fun `bounded range beyond head buffer calculates correct continuation range`() {
+        val headLength = 524288
+        val reqStart = 0L
+        val reqEnd = 1_000_000L
+        val totalLength = 5_000_000L
+
+        val targetEnd = reqEnd.coerceAtMost(totalLength - 1)
+        val downstreamLength = targetEnd - reqStart + 1
+        val continuationStart = headLength.toLong()
+        val continuationEnd = targetEnd
+
+        assertEquals(1_000_001L, downstreamLength)
+        assertEquals(524288L, continuationStart)
+        assertEquals(1_000_000L, continuationEnd)
+        assertEquals("bytes 0-1000000/5000000", "bytes 0-$targetEnd/$totalLength")
+    }
 }

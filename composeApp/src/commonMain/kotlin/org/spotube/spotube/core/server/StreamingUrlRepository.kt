@@ -150,14 +150,14 @@ class StreamingUrlRepository(
         }
     }
 
-    private fun persistToDisk() {
+    private suspend fun persistToDisk() {
         val basePath = paths?.getApplicationCacheDirPath() ?: return
         val path = basePath.toPath() / STREAM_URL_CACHE_FILENAME.toPath()
-        val entriesToSave = runCatching {
-            val now = Clock.System.now().toEpochMilliseconds()
-            val entriesSnapshot = streamUrlCache.filterValues { it.expiresAtMs > now }
-            PersistedStreamUrlStore(entriesSnapshot)
-        }.getOrNull() ?: return
+        val now = Clock.System.now().toEpochMilliseconds()
+        val entriesSnapshot = streamUrlCacheMutex.withLock {
+            streamUrlCache.filterValues { it.expiresAtMs > now }.toMap()
+        }
+        val entriesToSave = PersistedStreamUrlStore(entriesSnapshot)
 
         runCatching {
             fileSystem.createDirectories(path.parent ?: return)

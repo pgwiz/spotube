@@ -85,7 +85,7 @@ class CacheManager(
     }
 
     interface AsyncSink : AutoCloseable {
-        fun write(bytes: ByteArray, offset: Int, length: Int)
+        suspend fun write(bytes: ByteArray, offset: Int, length: Int)
         suspend fun complete(totalBytesWritten: Long, success: Boolean)
     }
 
@@ -102,10 +102,12 @@ class CacheManager(
         return object : AsyncSink {
             // Channel with capacity 64 chunks (up to 4 MB in memory) to absorb slow flash write spikes
             private val channel = Channel<ByteArray>(capacity = 64)
+            @kotlin.jvm.Volatile
+            private var writeFailed = false
+
             private val writeJob = scope.launch(Dispatchers.IO) {
                 var sink: BufferedSink? = null
                 var writtenBytes = 0L
-                var failed = false
                 try {
                     sink = fileSystem.sink(cacheFile).buffer()
                     for (chunk in channel) {
@@ -114,26 +116,30 @@ class CacheManager(
                     }
                     sink.flush()
                 } catch (e: Throwable) {
-                    failed = true
+                    writeFailed = true
                 } finally {
                     sink?.runCatching { close() }
-                    if (failed && fileSystem.exists(cacheFile)) {
+                    if (writeFailed && fileSystem.exists(cacheFile)) {
                         runCatching { fileSystem.delete(cacheFile) }
                     }
                 }
             }
 
-            override fun write(bytes: ByteArray, offset: Int, length: Int) {
-                if (length <= 0) return
+            override suspend fun write(bytes: ByteArray, offset: Int, length: Int) {
+                if (length <= 0 || writeFailed) return
                 val copy = bytes.copyOfRange(offset, offset + length)
-                channel.trySend(copy)
+                try {
+                    channel.send(copy)
+                } catch (e: Throwable) {
+                    writeFailed = true
+                }
             }
 
             override suspend fun complete(totalBytesWritten: Long, success: Boolean) {
                 channel.close()
                 writeJob.join()
 
-                val completed = success && (expectedLength == null || expectedLength == totalBytesWritten)
+                val completed = success && !writeFailed && (expectedLength == null || expectedLength == totalBytesWritten)
                 if (completed) {
                     commitCacheEntry(
                         trackId = trackId,
@@ -317,8 +323,6 @@ class CacheManager(
         call.respond(object : OutgoingContent.NoContent() {
             override val status: HttpStatusCode = HttpStatusCode.OK
             override val headers: Headers = HeadersBuilder().apply {
-                append(HttpHeaders.ContentType, entry.contentType)
-                append(HttpHeaders.ContentLength, entry.sizeBytes.toString())
                 append(HttpHeaders.AcceptRanges, "bytes")
             }.build()
             override val contentLength: Long = entry.sizeBytes

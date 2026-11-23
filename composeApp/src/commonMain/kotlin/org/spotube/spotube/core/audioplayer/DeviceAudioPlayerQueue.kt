@@ -46,8 +46,10 @@ import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.prepareRequest
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.utils.io.cancel
 import io.ktor.utils.io.readAvailable
@@ -761,46 +763,48 @@ class DeviceAudioPlayerQueue(
     }
 
     private suspend fun fetchAndStoreHeadDirect(trackId: String, url: String): Boolean {
-        val response = httpClient.get(url) {
+        return httpClient.prepareRequest(url) {
+            method = HttpMethod.Get
             header(HttpHeaders.Range, "bytes=0-${RamHeadBufferPool.HEAD_BUFFER_SIZE - 1}")
             applyStreamClientHeaders(url)
-        }
-        if (response.status != HttpStatusCode.PartialContent && response.status != HttpStatusCode.OK) {
-            logger.d { "Direct prefetch returned unexpected HTTP status ${response.status} for url $url" }
-            return false
-        }
-
-        val channel = response.bodyAsChannel()
-        val buffer = ByteArray(RamHeadBufferPool.HEAD_BUFFER_SIZE)
-        var totalRead = 0
-        try {
-            while (totalRead < RamHeadBufferPool.HEAD_BUFFER_SIZE && !channel.isClosedForRead) {
-                val read = channel.readAvailable(buffer, totalRead, RamHeadBufferPool.HEAD_BUFFER_SIZE - totalRead)
-                if (read <= 0) break
-                totalRead += read
+        }.execute { response ->
+            if (response.status != HttpStatusCode.PartialContent && response.status != HttpStatusCode.OK) {
+                logger.d { "Direct prefetch returned unexpected HTTP status ${response.status} for url $url" }
+                return@execute false
             }
-        } finally {
-            runCatching { channel.cancel() }
+
+            val channel = response.bodyAsChannel()
+            val buffer = ByteArray(RamHeadBufferPool.HEAD_BUFFER_SIZE)
+            var totalRead = 0
+            try {
+                while (totalRead < RamHeadBufferPool.HEAD_BUFFER_SIZE && !channel.isClosedForRead) {
+                    val read = channel.readAvailable(buffer, totalRead, RamHeadBufferPool.HEAD_BUFFER_SIZE - totalRead)
+                    if (read <= 0) break
+                    totalRead += read
+                }
+            } finally {
+                runCatching { channel.cancel() }
+            }
+
+            if (totalRead <= 0) return@execute false
+
+            val data = if (totalRead == RamHeadBufferPool.HEAD_BUFFER_SIZE) buffer else buffer.copyOf(totalRead)
+            val contentType = response.headers[HttpHeaders.ContentType]
+            val totalLength = response.headers[HttpHeaders.ContentRange]
+                ?.substringAfterLast('/')
+                ?.trim()
+                ?.toLongOrNull()
+                ?: response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+
+            RamHeadBufferPool.putHead(
+                trackId = trackId,
+                data = data,
+                contentType = contentType,
+                totalLength = totalLength,
+                isLookahead = true
+            )
+            true
         }
-
-        if (totalRead <= 0) return false
-
-        val data = if (totalRead == RamHeadBufferPool.HEAD_BUFFER_SIZE) buffer else buffer.copyOf(totalRead)
-        val contentType = response.headers[HttpHeaders.ContentType]
-        val totalLength = response.headers[HttpHeaders.ContentRange]
-            ?.substringAfterLast('/')
-            ?.trim()
-            ?.toLongOrNull()
-            ?: response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
-
-        RamHeadBufferPool.putHead(
-            trackId = trackId,
-            data = data,
-            contentType = contentType,
-            totalLength = totalLength,
-            isLookahead = true
-        )
-        return true
     }
 
     private suspend fun QueueEntry.toMediaItem(): MediaItem? {
