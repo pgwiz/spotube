@@ -211,7 +211,7 @@ fun DevicesScreen(
 
                 // Same cards as Settings > Playback, so making this device controllable (or renaming
                 // it) doesn't require a detour through Settings.
-                settings?.let { current ->
+                settings.let { current ->
                     settingsSectionHeader(Res.string.devices_section_this_device)
                     settingsSectionCard(
                         items = remoteControlSettingCards(current, settingsViewModel, requestLocalNetworkPermission)

@@ -342,7 +342,7 @@ fun AppExpandedPlayer(
                                         }
 
                                         is DownloadStatus.Failed, is DownloadStatus.Cancelled -> {
-                                            download?.let { downloadsViewModel.retry(it.id) }
+                                            downloadsViewModel.retry(download.id)
                                             scope.launch {
                                                 snackbarHostState.showSnackbar(getString(Res.string.player_download_retrying))
                                             }

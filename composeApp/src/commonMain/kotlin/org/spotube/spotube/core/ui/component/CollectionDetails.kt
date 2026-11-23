@@ -110,7 +110,7 @@ fun CollectionDetails(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         MillenniumButton(
                             modifier = if (isCompact) Modifier.weight(1f) else Modifier,
-                            onClick = onAddToJam!!) {
+                            onClick = onAddToJam) {
                             MillenniumIcon(
                                 imageVector = Iconsax.IconsaxAddSquare,
                                 contentDescription = stringResource(Res.string.track_options_add_to_jam))

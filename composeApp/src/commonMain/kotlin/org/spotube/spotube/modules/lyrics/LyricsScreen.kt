@@ -180,7 +180,7 @@ private fun ColumnScope.LyricsBody(uiState: LyricsUiState, viewModel: LyricsView
 
         uiState.error != null -> CenteredMessage {
             Text(
-                text = uiState.error ?: stringResource(Res.string.common_unknown_error),
+                text = uiState.error,
                 style = AppTheme.typography.bodyLarge,
                 color = MillenniumTheme.colors.danger,
                 textAlign = TextAlign.Center

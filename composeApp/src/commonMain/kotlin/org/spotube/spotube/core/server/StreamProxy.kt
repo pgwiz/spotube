@@ -614,7 +614,7 @@ internal class StreamProxy(
                 (parsedRange.totalSize == null || parsedRange.end + 1 == parsedRange.totalSize)
 
         val isCacheableStatus = upstream.status == HttpStatusCode.OK || isFullRange206
-        val expectedLength = if (isFullRange206) (parsedRange?.totalSize ?: downstreamContentLength) else downstreamContentLength
+        val expectedLength = if (isFullRange206) (parsedRange.totalSize ?: downstreamContentLength) else downstreamContentLength
 
         val shouldCache = requestMethod == HttpMethod.Get && isCachingEnabled() && isCacheableStatus && streamingMutex.withLock {
             if (trackId in streamingInProgress) {

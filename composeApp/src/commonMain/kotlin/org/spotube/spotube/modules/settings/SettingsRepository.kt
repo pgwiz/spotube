@@ -59,7 +59,7 @@ class SettingsRepository(private val database: Database) : UserSettingsStore {
     override val userSettings: StateFlow<UserSettings> = database.settingsDataStore.data.map { prefs ->
         val json = prefs[SETTINGS_KEY]
         if (json != null) {
-            settingsJson.decodeFromString<UserSettings>(json as String)
+            settingsJson.decodeFromString<UserSettings>(json)
         } else {
             UserSettings() // Default value
         }

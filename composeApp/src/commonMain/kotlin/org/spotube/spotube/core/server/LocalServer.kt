@@ -128,7 +128,7 @@ class LocalServer(
         logger.d { "Starting playback proxy port watcher" }
         portWatcher = scope.launch {
             settingsViewModel.settingsState
-                .mapNotNull { it?.let { s -> s.playbackProxyServerPort to s.allowRemoteControl } }
+                .map { it.playbackProxyServerPort to it.allowRemoteControl }
                 .distinctUntilChanged()
                 .collectLatest { (port, allowRemoteControl) ->
                     logger.d { "Observed server config change: port=$port, allowRemoteControl=$allowRemoteControl" }
@@ -138,9 +138,7 @@ class LocalServer(
         scope.launch {
             settingsViewModel.settingsState
                 .collect { settings ->
-                    if (settings != null) {
-                        cachedCacheEnabled.value = settings.enableMusicCaching
-                    }
+                    cachedCacheEnabled.value = settings.enableMusicCaching
                 }
         }
     }

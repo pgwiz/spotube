@@ -66,6 +66,7 @@ actual class NewPipeService {
         }
     }
 
+    @Suppress("DEPRECATION")
     actual suspend fun getVideoInfo(id: String): VideoInfo {
         return withContext(Dispatchers.IO) {
             val extractor = YouTube.getStreamExtractor("https://www.youtube.com/watch?v=$id")
