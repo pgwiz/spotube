@@ -103,8 +103,10 @@ class StreamingUrlRepository(
     private val matchedTracksRepository: TrackSourceRepository,
     private val settingsRepository: UserSettingsSource,
     private val streamUrlCacheTtlMs: Long = 5.5.hours.inWholeMilliseconds,
-    private val paths: Paths? = null,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())) : KoinComponent {
+    private val paths: Paths? = null
+) : KoinComponent {
+
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val logger by injectLogger<StreamingUrlRepository>()
     private val streamUrlCacheMutex = Mutex()

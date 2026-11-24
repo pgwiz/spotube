@@ -279,7 +279,7 @@ val sharedModules = module {
             settingsRepository = get(),
             paths = getOrNull())
     }
-    singleOf(::CacheManager)
+    single { CacheManager(paths = get(), settingsRepository = get()) }
     singleOf(::AlternativeTracksRepository)
     singleOf(::LocalServer) withOptions {
         createdAtStart()

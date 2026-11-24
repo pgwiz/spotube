@@ -67,8 +67,9 @@ data class CacheEntry(
 
 class CacheManager(
     private val paths: Paths,
-    private val settingsRepository: SettingsRepository,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())) {
+    private val settingsRepository: SettingsRepository
+) {
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val fileSystem: FileSystem = FileSystem.SYSTEM
     private val cacheMutex: Mutex = Mutex()
     private val json: Json = Json { ignoreUnknownKeys = true }
