@@ -26,8 +26,11 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import org.spotube.spotube.media.PlaybackService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +84,14 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
         .setPrioritizeTimeOverSizeThresholds(true)
         .build()
 
+    private val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+        .setConnectTimeoutMs(30_000)
+        .setReadTimeoutMs(30_000)
+        .setKeepPostFor302Redirects(true)
+        .setAllowCrossProtocolRedirects(true)
+
+    private val dataSourceFactory = DefaultDataSource.Factory(appContext, httpDataSourceFactory)
+
     private val exoPlayer: ExoPlayer = ExoPlayer.Builder(appContext)
         .setAudioAttributes(
             AudioAttributes.Builder()
@@ -89,6 +100,7 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
                 .build(),
             true
         )
+        .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
         .setLoadControl(customLoadControl)
         .setHandleAudioBecomingNoisy(true)
         .build()

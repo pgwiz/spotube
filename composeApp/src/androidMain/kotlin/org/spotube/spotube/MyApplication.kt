@@ -42,6 +42,15 @@ class MyApplication : Application(), KoinComponent {
         super.onCreate()
         setupCrashHandler()
 
+        // Prioritize IPv4 and configure modern TLS named groups to prevent carrier IPv6 drops/handshake resets on Android 15/16
+        try {
+            System.setProperty("java.net.preferIPv4Stack", "true")
+            System.setProperty("java.net.preferIPv6Addresses", "false")
+            System.setProperty("jdk.tls.namedGroups", "X25519MLKEM768,X25519Kyber768Draft00,X25519,secp256r1")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to set networking system properties", e)
+        }
+
         try {
             Paths.init(this)
         } catch (e: Throwable) {

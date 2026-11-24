@@ -26,22 +26,44 @@ import org.spotube.spotube.core.paths.Paths
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import okhttp3.ConnectionSpec
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Dns
 import okhttp3.HttpUrl
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.Path.Companion.toPath
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
+import java.net.Inet4Address
 import java.util.concurrent.TimeUnit
 
 class NewPipeDownloader(private val cookieJar: PersistentCookieJar) : Downloader() {
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .readTimeout(30, TimeUnit.SECONDS)
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .dns { hostname ->
+            runCatching {
+                val addresses = Dns.SYSTEM.lookup(hostname)
+                // Prioritize IPv4 addresses first to prevent SSLHandshakeException / EOFException on broken carrier IPv6 routes
+                addresses.sortedBy { if (it is Inet4Address) 0 else 1 }
+            }.getOrElse { Dns.SYSTEM.lookup(hostname) }
+        }
+        .fastFallback(false)
+        .retryOnConnectionFailure(true)
+        .connectionSpecs(
+            listOf(
+                ConnectionSpec.MODERN_TLS,
+                ConnectionSpec.COMPATIBLE_TLS,
+                ConnectionSpec.CLEARTEXT
+            )
+        )
+        .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
         .cookieJar(cookieJar)
         .build()
 
@@ -51,8 +73,13 @@ class NewPipeDownloader(private val cookieJar: PersistentCookieJar) : Downloader
         val headers = request.headers()
         val dataToSend = request.dataToSend()
 
+        val contentTypeStr = headers["Content-Type"]?.firstOrNull()
+            ?: headers["content-type"]?.firstOrNull()
+        val mediaType = contentTypeStr?.toMediaTypeOrNull()
+        val body = dataToSend?.toRequestBody(mediaType)
+
         val requestBuilder = okhttp3.Request.Builder()
-            .method(httpMethod, dataToSend?.toRequestBody())
+            .method(httpMethod, body)
             .url(url)
 
         headers.forEach { (key, values) ->
@@ -67,16 +94,18 @@ class NewPipeDownloader(private val cookieJar: PersistentCookieJar) : Downloader
         }
 
         val response = client.newCall(requestBuilder.build()).execute()
-        val responseBody = response.body.string()
-        val latestUrl = response.request.url.toString()
+        response.use { resp ->
+            val responseBody = resp.body.string()
+            val latestUrl = resp.request.url.toString()
 
-        return Response(
-            response.code,
-            response.message,
-            response.headers.toMultimap(),
-            responseBody,
-            latestUrl
-        )
+            return Response(
+                resp.code,
+                resp.message,
+                resp.headers.toMultimap(),
+                responseBody,
+                latestUrl
+            )
+        }
     }
 
     companion object {
