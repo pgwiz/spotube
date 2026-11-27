@@ -684,4 +684,50 @@ class StreamingUrlRepositoryBehaviorTest {
         val fallback = h.repository.resolveStreamInfo(track("t1"), forceRefresh = true, fallbackToLowerQuality = true)
         assertEquals("https://example.com/only.opus", fallback?.url)
     }
+
+    @Test
+    fun `fallbackToLowerQuality reuses cached source candidates without hitting plugin again`() = runTest {
+        val h = Harness()
+        val plugin = h.selectPlugin("pluginA")
+        plugin.audioAPI.onGetStreamsByTrack = {
+            listOf(streamedSource("src1", listOf(
+                stream("https://example.com/high.opus", bitrate = 256_000),
+                stream("https://example.com/medium.opus", bitrate = 128_000),
+                stream("https://example.com/low.opus", bitrate = 70_000)
+            )))
+        }
+
+        val normal = h.repository.resolveStreamInfo(track("t1"))
+        assertEquals("https://example.com/high.opus", normal?.url)
+        assertEquals(1, plugin.audioAPI.getStreamsByTrackCallCount)
+
+        val fallback = h.repository.resolveStreamInfo(track("t1"), forceRefresh = false, fallbackToLowerQuality = true)
+        assertEquals("https://example.com/medium.opus", fallback?.url)
+        assertEquals(1, plugin.audioAPI.getStreamsByTrackCallCount)
+    }
+
+    @Test
+    fun `stream resolution falls back to cached candidate streams when track lookup returns no sources on timeout`() = runTest {
+        val h = Harness()
+        val plugin = h.selectPlugin("pluginA")
+        plugin.audioAPI.onGetStreamsByTrack = {
+            listOf(streamedSource("src1", listOf(
+                stream("https://example.com/high.opus", bitrate = 256_000),
+                stream("https://example.com/medium.opus", bitrate = 128_000),
+                stream("https://example.com/low.opus", bitrate = 70_000)
+            )))
+        }
+
+        val normal = h.repository.resolveStreamInfo(track("t1"))
+        assertEquals("https://example.com/high.opus", normal?.url)
+
+        // Simulate plugin timeout / failure returning empty
+        plugin.audioAPI.onGetStreamsByTrack = { emptyList() }
+        h.matchedTracksRepository.deleteTrackSource(track("t1"), "pluginA")
+
+        // Next resolve with forceRefresh = true tries plugin, times out / returns empty,
+        // and falls back to cached stream candidates
+        val recovered = h.repository.resolveStreamInfo(track("t1"), forceRefresh = true)
+        assertEquals("https://example.com/high.opus", recovered?.url)
+    }
 }

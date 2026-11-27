@@ -19,6 +19,10 @@
 - **plugin/PluginManager**: Auto-select vacant ability slots on plugin installation and recover fallback providers on plugin removal (PR #3147).
 
 ### Fixes
+- **server/StreamProxy**: Prevent `ResponseAlreadySentException` in `proxyStream` by tracking committed response state and implementing seamless in-stream range reconnection (`Range: bytes=offset-`) inside `respondWithUpstream` when upstream sockets time out or drop mid-stream.
+- **server/StreamProxy**: Prevent audio container and codec corruption during spliced continuation by eliminating mid-stream quality downgrades and preserving bitstream consistency across reconnect retries.
+- **audioplayer/prefetch**: Prevent prefetch throttling guard bypass where zero buffer cushion (`bufferedAhead == 0`) erroneously launched prefetching on starving active tracks; properly protect actively playing tracks when buffering position is measured.
+- **server/StreamingUrlRepository**: Implement fast cached candidate resolution on quality fallback and automatic fallback to medium/lower bitrate stream candidates when audio plugin queries time out.
 - **server/resilience**: Prevent abrupt playback termination on transient upstream socket timeouts and connection resets by preserving continuation byte channels and resuming from the last acknowledged byte offset.
 - **audioplayer/prefetch**: Prevent active track rebuffering and bandwidth starvation caused by aggressive lookahead prefetching during early track startup on slow or congested networks.
 - **server/StreamProxy**: Prevent duplicate `Content-Length` and `Content-Type` headers in spliced 206 Partial Content responses that cause VLC player socket disconnections; correctly compute bounded continuation ranges (`bytes=0-N` where $N \ge 512\text{KB}$) and discard duplicated byte prefixes if upstream responds with 200 OK.

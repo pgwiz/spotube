@@ -323,11 +323,12 @@ internal class StreamProxy(
         var retryCount = 0
         val maxRetries = 3
         val upstreamStart = TimeSource.Monotonic.markNow()
+        var responseStarted = false
 
         // `request()` buffers the whole body before returning, which stalls the player until
         // the full track is downloaded. `execute {}` hands over the response as soon as headers
         // arrive so the body can be streamed.
-        while (true) {
+        while (!responseStarted) {
             var retryUrl: String? = null
             val failure = runCatching {
                 httpClient.prepareRequest(currentUrl) {
@@ -340,7 +341,8 @@ internal class StreamProxy(
                             "headers=${response.headers.entries().joinToString { "${it.key}=${it.value}" }}"
                     }
                     if (response.status.value < 400) {
-                        respondWithUpstream(call, response, trackId, requestMethod)
+                        responseStarted = true
+                        respondWithUpstream(call, response, currentUrl, trackId, requestMethod)
                         return@execute
                     }
 
@@ -366,9 +368,19 @@ internal class StreamProxy(
                             return@execute
                         }
                     }
-                    respondWithUpstream(call, response, trackId, requestMethod)
+                    responseStarted = true
+                    respondWithUpstream(call, response, currentUrl, trackId, requestMethod)
                 }
             }.exceptionOrNull()
+
+            if (responseStarted) {
+                // If respondWithUpstream was called, headers have been committed to the client.
+                // Do not retry at the HTTP request level, as call.respond cannot be called twice.
+                if (failure != null && failure !is CancellationException && !failure.isClientDisconnect()) {
+                    logger.w(failure) { "Upstream stream ended with error for track $trackId" }
+                }
+                return
+            }
 
             if (failure != null) {
                 if (failure is CancellationException) throw failure
@@ -492,7 +504,6 @@ internal class StreamProxy(
                 var retryCount = 0
                 val maxRetries = 5
                 var attemptedRefresh = false
-                var attemptedFallback = false
                 val chunk = ByteArray(STREAM_CHUNK_BYTES)
 
                 while (bytesRemaining > 0 && !continuationChannel.isClosedForWrite) {
@@ -516,14 +527,6 @@ internal class StreamProxy(
                                     if (!refreshedUrl.isNullOrBlank() && refreshedUrl != currentUrl) {
                                         retryUrl = refreshedUrl
                                         attemptedRefresh = true
-                                        return@execute
-                                    }
-                                }
-                                if (!attemptedFallback) {
-                                    val fallbackUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
-                                    if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
-                                        retryUrl = fallbackUrl
-                                        attemptedFallback = true
                                         return@execute
                                     }
                                 }
@@ -578,11 +581,11 @@ internal class StreamProxy(
                                     "(attempt $retryCount/$maxRetries). Retrying..."
                             }
 
-                            if (retryCount >= 2 && !attemptedFallback) {
-                                val fallbackUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
-                                if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
-                                    currentUrl = fallbackUrl
-                                    attemptedFallback = true
+                            if (retryCount >= 2 && !attemptedRefresh) {
+                                val refreshedUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true)?.url
+                                if (!refreshedUrl.isNullOrBlank() && refreshedUrl != currentUrl) {
+                                    currentUrl = refreshedUrl
+                                    attemptedRefresh = true
                                 }
                             }
 
@@ -694,6 +697,7 @@ internal class StreamProxy(
     private suspend fun respondWithUpstream(
         call: ApplicationCall,
         upstream: HttpResponse,
+        upstreamUrl: String,
         trackId: String,
         requestMethod: HttpMethod
     ) {
@@ -785,25 +789,139 @@ internal class StreamProxy(
                     cacheManager.openAsyncCacheSink(cacheFilename, trackIdForCache, cacheContentType, expectedLength)
                 } else null
 
-                try {
-                    val source = upstream.bodyAsChannel()
-                    val buffer = ByteArray(STREAM_CHUNK_BYTES)
-                    while (true) {
-                        val read = source.readAvailable(buffer, 0, buffer.size)
-                        if (read < 0) break
-                        if (read == 0) continue
-                        channel.writeFully(buffer, 0, read)
-                        channel.flush()
-                        asyncCacheSink?.write(buffer, 0, read)
-                        totalBytes += read
+                val initialRangeStart = parsedRange?.start ?: 0L
+                val chunkBuffer = ByteArray(STREAM_CHUNK_BYTES)
+                var currentSource: io.ktor.utils.io.ByteReadChannel? = upstream.bodyAsChannel()
+                var currentUrl = upstreamUrl
+                var retryCount = 0
+                val maxMidStreamRetries = 4
 
-                        if (headBytesBuffered < headBuffer.size) {
-                            val toCopy = minOf(read, headBuffer.size - headBytesBuffered)
-                            buffer.copyInto(headBuffer, destinationOffset = headBytesBuffered, startIndex = 0, endIndex = toCopy)
-                            headBytesBuffered += toCopy
+                try {
+                    while (!channel.isClosedForWrite) {
+                        var streamGlitch: Throwable? = null
+                        val source = currentSource
+                        if (source != null) {
+                            try {
+                                while (!channel.isClosedForWrite) {
+                                    val read = source.readAvailable(chunkBuffer, 0, chunkBuffer.size)
+                                    if (read < 0) break
+                                    if (read == 0) continue
+
+                                    channel.writeFully(chunkBuffer, 0, read)
+                                    channel.flush()
+                                    asyncCacheSink?.write(chunkBuffer, 0, read)
+                                    totalBytes += read
+
+                                    if (headBytesBuffered < headBuffer.size) {
+                                        val toCopy = minOf(read, headBuffer.size - headBytesBuffered)
+                                        chunkBuffer.copyInto(headBuffer, destinationOffset = headBytesBuffered, startIndex = 0, endIndex = toCopy)
+                                        headBytesBuffered += toCopy
+                                    }
+
+                                    retryCount = 0
+
+                                    if (expectedLength != null && totalBytes >= expectedLength) {
+                                        break
+                                    }
+                                }
+                            } catch (e: Throwable) {
+                                if (e is CancellationException) throw e
+                                if (e.isClientDisconnect() || channel.isClosedForWrite) {
+                                    throw e
+                                }
+                                streamGlitch = e
+                            }
+                        }
+
+                        val isFinished = expectedLength != null && totalBytes >= expectedLength
+                        if (isFinished || (streamGlitch == null && expectedLength == null && totalBytes > 0)) {
+                            completed = true
+                            break
+                        }
+
+                        if (channel.isClosedForWrite) {
+                            break
+                        }
+
+                        retryCount++
+                        if (retryCount > maxMidStreamRetries) {
+                            if (streamGlitch != null) throw streamGlitch
+                            break
+                        }
+
+                        val resumeOffset = initialRangeStart + totalBytes
+                        logger.w(streamGlitch) {
+                            "Transient upstream read glitch for $trackId at offset $resumeOffset " +
+                                "(attempt $retryCount/$maxMidStreamRetries). Reconnecting..."
+                        }
+
+                        val backoffMs = minOf(500L * (1L shl (retryCount - 1)), 3000L)
+                        delay(backoffMs)
+
+                        if (retryCount >= 2) {
+                            val refreshedUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true)?.url
+                            if (!refreshedUrl.isNullOrBlank()) {
+                                currentUrl = refreshedUrl
+                            }
+                        }
+
+                        currentSource = null
+                        val reconnectResult = runCatching {
+                            httpClient.prepareRequest(currentUrl) {
+                                method = HttpMethod.Get
+                                applyUpstreamHeaders(call, this, currentUrl, includeRange = false)
+                                headers[HttpHeaders.Range] = "bytes=$resumeOffset-"
+                            }.execute { reconnectResponse ->
+                                if (reconnectResponse.status.value >= 400) {
+                                    throw IOException("Upstream continuation reconnect failed with status ${reconnectResponse.status.value}")
+                                }
+                                val resumedSource = reconnectResponse.bodyAsChannel()
+                                if (reconnectResponse.status == HttpStatusCode.OK && resumeOffset > 0) {
+                                    var toDiscard = resumeOffset
+                                    val discardBuf = ByteArray(STREAM_CHUNK_BYTES)
+                                    while (toDiscard > 0 && !resumedSource.isClosedForRead && !channel.isClosedForWrite) {
+                                        val toRead = minOf(toDiscard, discardBuf.size.toLong()).toInt()
+                                        val discarded = resumedSource.readAvailable(discardBuf, 0, toRead)
+                                        if (discarded < 0) break
+                                        toDiscard -= discarded
+                                    }
+                                }
+
+                                while (!channel.isClosedForWrite && (expectedLength == null || totalBytes < expectedLength)) {
+                                    val read = resumedSource.readAvailable(chunkBuffer, 0, chunkBuffer.size)
+                                    if (read < 0) break
+                                    if (read == 0) continue
+
+                                    channel.writeFully(chunkBuffer, 0, read)
+                                    channel.flush()
+                                    asyncCacheSink?.write(chunkBuffer, 0, read)
+                                    totalBytes += read
+
+                                    if (headBytesBuffered < headBuffer.size) {
+                                        val toCopy = minOf(read, headBuffer.size - headBytesBuffered)
+                                        chunkBuffer.copyInto(headBuffer, destinationOffset = headBytesBuffered, startIndex = 0, endIndex = toCopy)
+                                        headBytesBuffered += toCopy
+                                    }
+                                    retryCount = 0
+                                }
+                            }
+                        }
+
+                        if (expectedLength != null && totalBytes >= expectedLength) {
+                            completed = true
+                            break
+                        }
+
+                        val reconnectError = reconnectResult.exceptionOrNull()
+                        if (reconnectError != null) {
+                            if (reconnectError is CancellationException) throw reconnectError
+                            if (reconnectError.isClientDisconnect() || channel.isClosedForWrite) {
+                                throw reconnectError
+                            }
+                            logger.w(reconnectError) { "Upstream reconnect attempt failed for $trackId" }
                         }
                     }
-                    completed = expectedLength == null || expectedLength == totalBytes
+                    completed = expectedLength == null || totalBytes >= expectedLength
                 } finally {
                     asyncCacheSink?.complete(totalBytes, success = completed)
                     if (shouldCache) {

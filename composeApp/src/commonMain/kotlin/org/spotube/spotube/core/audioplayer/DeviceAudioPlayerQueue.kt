@@ -706,8 +706,10 @@ class DeviceAudioPlayerQueue(
         val remainingSec = (duration - position).inWholeSeconds
 
         // Bandwidth-aware buffer ahead calculation
-        val bufferedAhead = (audioPlayer.bufferingPositionFlow.value - position).coerceAtLeast(kotlin.time.Duration.ZERO)
-        val isFullyBuffered = duration > kotlin.time.Duration.ZERO && audioPlayer.bufferingPositionFlow.value >= duration
+        val bufferedPosition = audioPlayer.bufferingPositionFlow.value
+        val supportsBufferingReporting = bufferedPosition > kotlin.time.Duration.ZERO
+        val bufferedAhead = (bufferedPosition - position).coerceAtLeast(kotlin.time.Duration.ZERO)
+        val isFullyBuffered = duration > kotlin.time.Duration.ZERO && bufferedPosition >= duration
 
         // Predictive Lookahead Pre-Buffering trigger:
         // On slow/congested networks, firing early while Track N is still building its buffer starves
@@ -720,10 +722,10 @@ class DeviceAudioPlayerQueue(
         // (unless < 15s remaining or fully buffered) to prevent a re-buffering stutter loop near the transition.
         val isProgressCandidate = progress >= 0.75 || remainingSec <= 30
         val isProgressTrigger = isProgressCandidate && (
+            (!supportsBufferingReporting && remainingSec <= 20) ||
             bufferedAhead >= 8.seconds ||
             remainingSec <= 15 ||
-            isFullyBuffered ||
-            bufferedAhead == kotlin.time.Duration.ZERO
+            isFullyBuffered
         )
 
         if (!isWarmupTrigger && !isProgressTrigger) return

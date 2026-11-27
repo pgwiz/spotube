@@ -9,7 +9,7 @@ _Durable knowledge — decisions, gotchas, conventions for Spotube streaming and
 - **Slow Network Resilience & Adaptive Buffering**:
   - Android ExoPlayer rebuffer threshold tuned to 2,500ms (`bufferForPlaybackAfterRebufferMs = 2_500`) while keeping initial playback startup instant at 500ms (`bufferForPlaybackMs = 500`). This stops stuttering loops on narrow or fluctuating mobile networks.
   - VLC caching on Desktop and iOS tuned to 2,000ms network caching, 1,000ms file caching, and 500ms clock jitter tolerance to absorb packet drops.
-  - Upstream continuation in `StreamProxy` implements an exponential backoff reconnect loop (up to 5 retries from the exact failed byte offset) and falls back to lower/medium bitrate audio streams (e.g. 70–128 kbps Opus/AAC) when high-bitrate streams experience consecutive timeouts or stalls.
+  - Upstream continuation in `StreamProxy` implements an exponential backoff reconnect loop (up to 5 retries from the exact failed byte offset). Initial stream resolution falls back to lower/medium bitrate audio streams (e.g. 70–128 kbps Opus/AAC) on slow/congested networks or plugin timeouts before playback begins; mid-stream continuation strictly preserves bitstream/container consistency.
 - **Bandwidth-Aware Prefetch Throttling**:
   - In `DeviceAudioPlayerQueue`, lookahead prefetching for Track N+1 is paused or cancelled immediately whenever the player enters `BUFFERING`.
   - Warmup prefetch (+5s) requires $\ge 20\text{s}$ buffer headroom ahead on Track N; near-end prefetch requires $\ge 8\text{s}$ buffer cushion.
@@ -19,6 +19,7 @@ _Durable knowledge — decisions, gotchas, conventions for Spotube streaming and
 
 ## Gotchas
 - **Duplicate Headers in Ktor Partial Content Responses**: VLC player terminates sockets when responses have duplicate `Content-Length` or `Content-Type` headers. Do not manually append these headers to `HeadersBuilder`; let Ktor's `OutgoingContent` properties supply them.
+- **Mid-Stream Format and Response Re-entry in Ktor**: Never attempt to re-invoke `call.respond()` after response headers have started streaming (throws `ResponseAlreadySentException`). Never switch stream bitrates or containers mid-stream across arbitrary byte offsets, as progressive demuxers (Matroska/WebM, MP4) will fail with fatal parse errors. In-stream recovery must reconnect with `Range: bytes=offset-` to the identical format stream.
 - **Gobley and Cargo 1.100+**: Cargo 1.100 changed directory layouts for build scripts, causing Gobley 0.3.7 to throw `FileNotFoundException`. Always pin `dtolnay/rust-toolchain@1.99.1` in CI workflows.
 - **Local Proxy Loopback on Native**: Pre-buffering directly through `httpClient` instead of loopback proxy prevents socket lockups and preserves the proxy pool for active player requests.
 

@@ -289,6 +289,18 @@ class StreamingUrlRepository(
             }
         }
 
+        // Fast fallback on slow connection: if lower quality fallback was requested and candidates were previously cached
+        if (fallbackToLowerQuality && !forceRefresh) {
+            val cachedEntry = getCachedStreamUrlEntry(trackId)
+            if (cachedEntry?.source != null && cachedEntry.pluginId == audioPlugin.pluginId) {
+                val fallbackStream = select(cachedEntry.source, "cached stream candidates")
+                if (fallbackStream != null) {
+                    logger.i { "[Resolve $trackId] stream fallback reused cached stream candidate: ${fallbackStream.url}" }
+                    return fallbackStream.toStreamInfo()
+                }
+            }
+        }
+
         val source = matchedTracksRepository.getTrackSource(track, audioPlugin.pluginId)
 
         if (source != null) {
@@ -335,6 +347,14 @@ class StreamingUrlRepository(
         }.orEmpty()
 
         if (sources.isEmpty()) {
+            val cachedEntry = getCachedStreamUrlEntry(trackId)
+            if (cachedEntry?.source != null && cachedEntry.pluginId == audioPlugin.pluginId) {
+                logger.w { "[Resolve $trackId] stream resolution timed out on track lookup; falling back to cached source stream candidates" }
+                val fallbackStream = select(cachedEntry.source, "timeout fallback from cached source")
+                if (fallbackStream != null) {
+                    return fallbackStream.toStreamInfo()
+                }
+            }
             logger.w { "No stream candidates found for track $trackId" }
             return null
         }
@@ -366,6 +386,14 @@ class StreamingUrlRepository(
         }
 
         if (stream == null) {
+            val cachedEntry = getCachedStreamUrlEntry(trackId)
+            if (cachedEntry?.source != null && cachedEntry.pluginId == audioPlugin.pluginId) {
+                logger.w { "[Resolve $trackId] stream fetch timed out; falling back to cached source stream candidates" }
+                val fallbackStream = select(cachedEntry.source, "timeout fallback from cached source")
+                if (fallbackStream != null) {
+                    return fallbackStream.toStreamInfo()
+                }
+            }
             logger.w { "No stream candidates found for track $trackId" }
             return null
         }
