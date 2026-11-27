@@ -319,6 +319,9 @@ internal class StreamProxy(
 
         var currentUrl = streamUrl
         var attemptedRefresh = false
+        var attemptedFallback = false
+        var retryCount = 0
+        val maxRetries = 3
         val upstreamStart = TimeSource.Monotonic.markNow()
 
         // `request()` buffers the whole body before returning, which stalls the player until
@@ -349,6 +352,17 @@ internal class StreamProxy(
                             streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true)?.url
                         if (!refreshedUrl.isNullOrBlank() && refreshedUrl != currentUrl) {
                             retryUrl = refreshedUrl
+                            attemptedRefresh = true
+                            return@execute
+                        }
+                    }
+
+                    if (!attemptedFallback) {
+                        val fallbackUrl =
+                            streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
+                        if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
+                            retryUrl = fallbackUrl
+                            attemptedFallback = true
                             return@execute
                         }
                     }
@@ -362,7 +376,25 @@ internal class StreamProxy(
                     logger.i(failure) { "[Req] player closed the connection while streaming track $trackId" }
                     return
                 }
-                logger.w(failure) { "Failed to fetch upstream stream for track $trackId" }
+
+                retryCount++
+                if (retryCount <= maxRetries) {
+                    logger.w(failure) {
+                        "Transient failure connecting upstream for track $trackId (attempt $retryCount/$maxRetries). Retrying..."
+                    }
+                    if (retryCount >= 2 && !attemptedFallback) {
+                        val fallbackUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
+                        if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
+                            currentUrl = fallbackUrl
+                            attemptedFallback = true
+                        }
+                    }
+                    val backoffMs = minOf(500L * (1L shl (retryCount - 1)), 3000L)
+                    delay(backoffMs)
+                    continue
+                }
+
+                logger.w(failure) { "Failed to fetch upstream stream for track $trackId after $maxRetries retries" }
                 // Throws if the response already started streaming; nothing more to send then
                 runCatching { call.respond(HttpStatusCode.BadGateway, "Failed to fetch upstream stream") }
                 return
@@ -371,7 +403,7 @@ internal class StreamProxy(
             val next = retryUrl ?: return
             logger.d { "Retrying stream for track $trackId using refreshed URL" }
             currentUrl = next
-            attemptedRefresh = true
+            delay(200)
         }
     }
 
@@ -455,40 +487,57 @@ internal class StreamProxy(
                 }
 
                 var currentUrl = streamInfo.url
+                var currentOffset = continuationStart
+                var bytesRemaining = if (reqEnd != null) (continuationEnd - continuationStart + 1) else Long.MAX_VALUE
+                var retryCount = 0
+                val maxRetries = 5
                 var attemptedRefresh = false
+                var attemptedFallback = false
+                val chunk = ByteArray(STREAM_CHUNK_BYTES)
 
-                while (true) {
+                while (bytesRemaining > 0 && !continuationChannel.isClosedForWrite) {
                     var retryUrl: String? = null
-                    val failure = runCatching {
+                    val fetchResult = runCatching {
                         httpClient.prepareRequest(currentUrl) {
                             method = HttpMethod.Get
                             applyUpstreamHeaders(call, this, currentUrl, includeRange = false)
                             val rangeHeaderVal = if (reqEnd != null) {
-                                "bytes=$continuationStart-$continuationEnd"
+                                "bytes=$currentOffset-$continuationEnd"
                             } else {
-                                "bytes=$continuationStart-"
+                                "bytes=$currentOffset-"
                             }
                             headers[HttpHeaders.Range] = rangeHeaderVal
                         }.execute { response ->
                             if (response.status.value >= 400) {
-                                logger.w { "Upstream continuation failed for $trackId status=${response.status.value}" }
+                                logger.w { "Upstream continuation failed for $trackId status=${response.status.value} offset=$currentOffset" }
                                 streamingUrlRepository.invalidateCachedStreamUrl(trackId, currentUrl)
                                 if (!attemptedRefresh) {
                                     val refreshedUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true)?.url
                                     if (!refreshedUrl.isNullOrBlank() && refreshedUrl != currentUrl) {
                                         retryUrl = refreshedUrl
+                                        attemptedRefresh = true
                                         return@execute
                                     }
                                 }
-                                continuationChannel.cancel(IllegalStateException("Upstream status ${response.status.value}"))
-                                return@execute
+                                if (!attemptedFallback) {
+                                    val fallbackUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
+                                    if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
+                                        retryUrl = fallbackUrl
+                                        attemptedFallback = true
+                                        return@execute
+                                    }
+                                }
+                                throw IOException("Upstream status ${response.status.value}")
                             }
 
+                            // Connection established successfully, reset transient connect retry count
+                            retryCount = 0
+
                             val upstreamSource = response.bodyAsChannel()
-                            if (response.status == HttpStatusCode.OK && continuationStart > 0) {
-                                var toDiscard = continuationStart
+                            if (response.status == HttpStatusCode.OK && currentOffset > 0) {
+                                var toDiscard = currentOffset
                                 val discardBuf = ByteArray(STREAM_CHUNK_BYTES)
-                                while (toDiscard > 0 && !upstreamSource.isClosedForRead) {
+                                while (toDiscard > 0 && !upstreamSource.isClosedForRead && !continuationChannel.isClosedForWrite) {
                                     val toRead = minOf(toDiscard, discardBuf.size.toLong()).toInt()
                                     val discarded = upstreamSource.readAvailable(discardBuf, 0, toRead)
                                     if (discarded < 0) break
@@ -496,32 +545,79 @@ internal class StreamProxy(
                                 }
                             }
 
-                            var bytesRemaining = if (reqEnd != null) (continuationEnd - continuationStart + 1) else Long.MAX_VALUE
-                            val chunk = ByteArray(STREAM_CHUNK_BYTES)
-                            while (bytesRemaining > 0 && !upstreamSource.isClosedForRead) {
+                            while (bytesRemaining > 0 && !upstreamSource.isClosedForRead && !continuationChannel.isClosedForWrite) {
                                 val toRead = minOf(chunk.size.toLong(), bytesRemaining).toInt()
                                 val read = upstreamSource.readAvailable(chunk, 0, toRead)
                                 if (read < 0) break
                                 if (read == 0) continue
                                 continuationChannel.writeFully(chunk, 0, read)
-                                bytesRemaining -= read
+                                currentOffset += read
+                                if (bytesRemaining != Long.MAX_VALUE) {
+                                    bytesRemaining -= read
+                                }
                             }
-                            continuationChannel.close()
                         }
-                    }.exceptionOrNull()
-
-                    if (failure != null) {
-                        if (failure !is CancellationException) {
-                            logger.w(failure) { "Upstream continuation fetch exception for $trackId" }
-                        }
-                        continuationChannel.cancel(failure)
-                        return@launch
                     }
 
-                    val next = retryUrl ?: return@launch
-                    currentUrl = next
-                    attemptedRefresh = true
+                    if (bytesRemaining <= 0) {
+                        break
+                    }
+
+                    val failure = fetchResult.exceptionOrNull()
+                    if (failure != null) {
+                        if (failure is CancellationException) throw failure
+                        if (continuationChannel.isClosedForWrite) {
+                            // Downstream player socket closed or cancelled
+                            return@launch
+                        }
+
+                        retryCount++
+                        if (retryCount <= maxRetries) {
+                            logger.w(failure) {
+                                "Upstream continuation glitch for $trackId at offset $currentOffset " +
+                                    "(attempt $retryCount/$maxRetries). Retrying..."
+                            }
+
+                            if (retryCount >= 2 && !attemptedFallback) {
+                                val fallbackUrl = streamingUrlRepository.resolveStreamInfo(trackId, forceRefresh = true, fallbackToLowerQuality = true)?.url
+                                if (!fallbackUrl.isNullOrBlank() && fallbackUrl != currentUrl) {
+                                    currentUrl = fallbackUrl
+                                    attemptedFallback = true
+                                }
+                            }
+
+                            val backoffMs = minOf(500L * (1L shl (retryCount - 1)), 3000L)
+                            delay(backoffMs)
+                            continue
+                        } else {
+                            logger.e(failure) { "Upstream continuation fetch exhausted $maxRetries retries for $trackId at offset $currentOffset" }
+                            continuationChannel.cancel(failure)
+                            return@launch
+                        }
+                    }
+
+                    if (retryUrl != null) {
+                        currentUrl = retryUrl
+                        delay(200)
+                        continue
+                    }
+
+                    // If upstream closed before reading expected bytes, retry from currentOffset
+                    if (bytesRemaining <= 0) {
+                        break
+                    }
+
+                    if (reqEnd != null && currentOffset <= continuationEnd) {
+                        retryCount++
+                        if (retryCount <= maxRetries) {
+                            val backoffMs = minOf(500L * (1L shl (retryCount - 1)), 3000L)
+                            delay(backoffMs)
+                            continue
+                        }
+                    }
+                    break
                 }
+                continuationChannel.close()
             } catch (e: Throwable) {
                 continuationChannel.cancel(e)
             }

@@ -65,8 +65,9 @@ final class VlcPlayerEngine: NSObject, NativePlayerEngine, VLCMediaPlayerDelegat
             }
 
             let media = VLCMedia(url: mediaUrl)
-            media.addOption(":network-caching=200")
-            media.addOption(":file-caching=200")
+            media.addOption(":network-caching=2000")
+            media.addOption(":file-caching=1000")
+            media.addOption(":clock-jitter=500")
             if startPositionMs > 0 {
                 media.addOption(":start-time=\(Double(startPositionMs) / 1000.0)")
             }

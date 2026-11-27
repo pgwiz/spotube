@@ -181,7 +181,8 @@ class StreamingUrlRepository(
 
     suspend fun resolveStreamInfo(
         trackId: String,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        fallbackToLowerQuality: Boolean = false
     ): StreamInfo? {
         val queueEntry = audioPlayerQueue.queueFlow.value.firstOrNull {
             it is QueueEntry.StreamingTrack && it.track.id == trackId
@@ -191,21 +192,34 @@ class StreamingUrlRepository(
             logger.v { "Track $trackId is not present in current queue" }
             return null
         }
-        return resolveStreamInfo(queueEntry.track, forceRefresh)
+        return resolveStreamInfo(queueEntry.track, forceRefresh, fallbackToLowerQuality = fallbackToLowerQuality)
     }
 
     suspend fun resolveStreamInfo(
         track: MetadataTrack,
         forceRefresh: Boolean = false,
-        request: StreamRequest? = null
+        request: StreamRequest? = null,
+        fallbackToLowerQuality: Boolean = false
     ): StreamInfo? {
         val trackId = track.id
         val settings = settingsRepository.userSettings.value
         val preferredFormat = request?.format ?: settings.streamingMusicFormat
-        val preferredQuality = request?.quality ?: settings.streamingMusicQuality
+        val basePreferredQuality = request?.quality ?: settings.streamingMusicQuality
+        val preferredQuality = if (fallbackToLowerQuality) {
+            when (basePreferredQuality) {
+                is AudioQuality.Lossless -> AudioQuality.Lossy(160_000)
+                is AudioQuality.Lossy -> {
+                    if (basePreferredQuality.bitrate > 160_000) AudioQuality.Lossy(128_000)
+                    else if (basePreferredQuality.bitrate > 96_000) AudioQuality.Lossy(70_000)
+                    else AudioQuality.Lossy(48_000)
+                }
+            }
+        } else {
+            basePreferredQuality
+        }
         // The URL cache holds what *playback* resolved; a download with other prefs must not
         // read it, nor replace it with a stream playback didn't ask for.
-        val useUrlCache = request == null
+        val useUrlCache = request == null && !fallbackToLowerQuality
 
         // A built-in audio plugin is always selected, so null means plugins are still loading.
         // The player requests the restored queue's track right at startup; failing that request
@@ -236,8 +250,33 @@ class StreamingUrlRepository(
             } else {
                 stream.streams
             }
-            return selectPreferredAudioStream(candidates, preferredFormat, preferredQuality)
-                .also { logSelection(trackId, origin, candidates, preferredFormat, preferredQuality, it) }
+            val filteredCandidates = if (fallbackToLowerQuality) {
+                val maxBitrate = candidates.maxOfOrNull {
+                    when (it) {
+                        is AudioStream.Lossy -> it.bitrate
+                        is AudioStream.Lossless -> Int.MAX_VALUE
+                    }
+                } ?: Int.MAX_VALUE
+                val lowerCandidates = candidates.filter {
+                    when (it) {
+                        is AudioStream.Lossy -> it.bitrate < maxBitrate
+                        is AudioStream.Lossless -> false
+                    }
+                }
+                if (lowerCandidates.isNotEmpty()) {
+                    logger.i {
+                        "[Resolve $trackId] stream fallback on slow connection/timeout: dropped highest bitrate (${maxBitrate}bps), " +
+                            "evaluating ${lowerCandidates.size} medium/lower bitrate candidates"
+                    }
+                    lowerCandidates
+                } else {
+                    candidates
+                }
+            } else {
+                candidates
+            }
+            return selectPreferredAudioStream(filteredCandidates, preferredFormat, preferredQuality)
+                .also { logSelection(trackId, origin, filteredCandidates, preferredFormat, preferredQuality, it) }
         }
 
         if (useUrlCache && !forceRefresh) {
@@ -255,12 +294,14 @@ class StreamingUrlRepository(
         if (source != null) {
             logger.d { "Attempting stream resolution for track $trackId using cached source" }
             val stream = runCatching {
-                audioPlugin.use {
-                    audioAPI.getStreamsOfAudioSource(source)
-                        .firstOrNull()
+                withTimeoutOrNull(STREAM_RESOLVE_TIMEOUT) {
+                    audioPlugin.use {
+                        audioAPI.getStreamsOfAudioSource(source)
+                            .firstOrNull()
+                    }
                 }
             }.getOrElse { throwable ->
-                logger.w(throwable) { "Failed to resolve audio stream for track $trackId using matched source" }
+                logger.w(throwable) { "Failed or timed out to resolve audio stream for track $trackId using matched source" }
                 null
             }
 
@@ -283,13 +324,15 @@ class StreamingUrlRepository(
 
         logger.d { "Attempting stream resolution for track $trackId using track lookup" }
         val sources = runCatching {
-            audioPlugin.use {
-                audioAPI.getStreamsByTrack(track)
+            withTimeoutOrNull(STREAM_RESOLVE_TIMEOUT) {
+                audioPlugin.use {
+                    audioAPI.getStreamsByTrack(track)
+                }
             }
         }.getOrElse { throwable ->
-            logger.w(throwable) { "Failed to resolve audio stream for track $trackId" }
-            return null
-        }
+            logger.w(throwable) { "Failed or timed out to resolve audio stream for track $trackId" }
+            null
+        }.orEmpty()
 
         if (sources.isEmpty()) {
             logger.w { "No stream candidates found for track $trackId" }
@@ -299,25 +342,27 @@ class StreamingUrlRepository(
         cacheAlternatives(trackId, sources, audioPlugin.pluginId)
 
         val stream = runCatching {
-            audioPlugin.use {
-                sources.firstNotNullOfOrNull { src ->
-                    when (src) {
-                        is AudioSource.Streamed -> {
-                            matchedTracksRepository.saveTrackSource(track, src.toBasic(), audioPlugin.pluginId)
-                            src
-                        }
+            withTimeoutOrNull(STREAM_RESOLVE_TIMEOUT) {
+                audioPlugin.use {
+                    sources.firstNotNullOfOrNull { src ->
+                        when (src) {
+                            is AudioSource.Streamed -> {
+                                matchedTracksRepository.saveTrackSource(track, src.toBasic(), audioPlugin.pluginId)
+                                src
+                            }
 
-                        is AudioSource.Basic -> {
-                            matchedTracksRepository.saveTrackSource(track, src, audioPlugin.pluginId)
-                            audioAPI.getStreamsOfAudioSource(src)
-                                .firstOrNull()
+                            is AudioSource.Basic -> {
+                                matchedTracksRepository.saveTrackSource(track, src, audioPlugin.pluginId)
+                                audioAPI.getStreamsOfAudioSource(src)
+                                    .firstOrNull()
+                            }
                         }
                     }
                 }
             }
         }.getOrElse { throwable ->
-            logger.w(throwable) { "Failed to resolve audio stream for track $trackId" }
-            return null
+            logger.w(throwable) { "Failed or timed out to resolve audio stream for track $trackId" }
+            null
         }
 
         if (stream == null) {
@@ -502,6 +547,7 @@ class StreamingUrlRepository(
  * resolved against the YouTube origin; progressive URLs are returned unchanged.
  */
 private val AUDIO_PLUGIN_LOAD_TIMEOUT = 30.seconds
+private val STREAM_RESOLVE_TIMEOUT = 15.seconds
 
 internal fun normalizeManifestUrl(url: String, protocol: StreamProtocol): String {
     if (url.startsWith("http")) return url

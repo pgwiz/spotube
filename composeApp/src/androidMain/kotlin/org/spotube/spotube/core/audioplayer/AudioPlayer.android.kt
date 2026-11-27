@@ -72,10 +72,10 @@ actual class AudioPlayer actual constructor(context: Any) : AudioPlayerInterface
 
     private val customLoadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
-            15_000,
+            20_000,
             60_000,
             500,
-            1_000
+            2_500
         )
         .setBackBuffer(
             30_000,

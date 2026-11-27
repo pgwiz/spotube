@@ -69,11 +69,12 @@ class LocalServer(
 
     val logger by injectLogger<LocalServer>()
     private val httpClient = httpClientFactory.create {
-        // A stalled upstream connection must not wedge an engine thread
-        // forever. Only the connect phase is bounded — the proxy streams long
-        // audio bodies, so request/socket timeouts would cut playback short.
+        // On slow, high-latency, or congested connections, upstream connect phase may take
+        // longer than 10s. Set connectTimeout to 20s and socketTimeout (inactivity) to 30s
+        // so stalled sockets time out cleanly and trigger resilient continuation/retry.
         install(HttpTimeout) {
-            connectTimeoutMillis = 10_000
+            connectTimeoutMillis = 20_000
+            socketTimeoutMillis = 30_000
         }
     }
 

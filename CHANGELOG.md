@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Features
+- **playback/slow-network**: Implement slow-network resilience and adaptive buffering: tune Android ExoPlayer rebuffer threshold to 2,500ms while preserving 500ms instant initial startup; adjust Desktop/iOS VLC caching parameters (`--network-caching=2000`, `--file-caching=1000`, `--clock-jitter=500`) to absorb packet jitter and network spikes.
+- **playback/prefetch-throttling**: Implement bandwidth-aware prefetch throttling in `DeviceAudioPlayerQueue`: immediately cancel lookahead prefetching when the active track is buffering, require $\ge 20\text{s}$ buffer headroom for early warmup prefetch, and require $\ge 8\text{s}$ buffer cushion for end-of-track prefetching to guarantee 100% bandwidth availability for active playback.
+- **server/resilience**: Implement upstream continuation reconnect retry with exponential backoff (up to 5 retries from current offset) and automatic fallback to lower/medium bitrate audio streams (e.g., 70–128 kbps Opus/AAC) under congested or high-latency network conditions.
+- **server/timeouts**: Harden Ktor proxy client timeouts with 20s connect and 30s socket inactivity timeouts to gracefully detect stalled sockets and trigger instant continuation reconnects without wedging engine threads.
 - **playback/caching**: Implement decoupled async RAM head splicing in `StreamProxy` with immediate HTTP 206 Partial Content responses (<2ms TTFB) using cached 512KB RAM buffer in `RamHeadBufferPool` and asynchronous background continuation streaming.
 - **playback/prefetch**: Implement direct speculative pre-fetching in `DeviceAudioPlayerQueue` directly populating `RamHeadBufferPool` from upstream CDN without local proxy loopback contention.
 - **server/StreamingUrlRepository**: Implement persistent 5.5-hour stream URL disk store bound to YouTube URL expiration parameter to eliminate redundant YouTube scraping on replay and app restart.

@@ -68,6 +68,7 @@ import org.spotube.spotube.core.server.applyStreamClientHeaders
 import org.spotube.spotube.getPlatform
 import kotlin.random.Random
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class DeviceAudioPlayerQueue(
     private val audioPlayer: AudioPlayerInterface,
@@ -150,6 +151,15 @@ class DeviceAudioPlayerQueue(
                 persistQueueStateIfReady()
                 lastPrefetchedTrackId = null
                 cancelOngoingPrefetch()
+            }
+        }
+
+        scope.launch {
+            audioPlayer.playerStateFlow.collect { state ->
+                if (state == PlayerState.BUFFERING) {
+                    logger.d { "Player is buffering active track: cancelling ongoing prefetch to yield bandwidth" }
+                    cancelOngoingPrefetch()
+                }
             }
         }
 
@@ -689,14 +699,33 @@ class DeviceAudioPlayerQueue(
     ) {
         if (currentMedia == null || duration <= kotlin.time.Duration.ZERO || duration.inWholeSeconds < 5) return
 
+        // Guard 1: Never prefetch while the active track is buffering
+        if (audioPlayer.playerStateFlow.value == PlayerState.BUFFERING) return
+
         val progress = position.inWholeMilliseconds.toDouble() / duration.inWholeMilliseconds.toDouble()
         val remainingSec = (duration - position).inWholeSeconds
 
+        // Bandwidth-aware buffer ahead calculation
+        val bufferedAhead = (audioPlayer.bufferingPositionFlow.value - position).coerceAtLeast(kotlin.time.Duration.ZERO)
+        val isFullyBuffered = duration > kotlin.time.Duration.ZERO && audioPlayer.bufferingPositionFlow.value >= duration
+
         // Predictive Lookahead Pre-Buffering trigger:
-        // Trigger at +3s after Track N starts or when progress >= 70% (or <=30s remaining).
-        // Rapid skips (skipping within 3 seconds) return immediately before lookahead prefetching fires.
-        val isWarmupTrigger = position.inWholeMilliseconds >= 3_000L
-        val isProgressTrigger = progress >= 0.70 || remainingSec <= 30
+        // On slow/congested networks, firing early while Track N is still building its buffer starves
+        // the active stream. Only execute warmup prefetch if the active track has already built up a
+        // substantial safety margin (>= 20s buffered ahead or fully buffered).
+        val isWarmupTrigger = position.inWholeMilliseconds >= 5_000L && (bufferedAhead >= 20.seconds || isFullyBuffered)
+
+        // Progress trigger (near end of track): progress >= 75% or <= 30s remaining.
+        // If network is constrained, ensure the active track has at least an 8s buffer ahead
+        // (unless < 15s remaining or fully buffered) to prevent a re-buffering stutter loop near the transition.
+        val isProgressCandidate = progress >= 0.75 || remainingSec <= 30
+        val isProgressTrigger = isProgressCandidate && (
+            bufferedAhead >= 8.seconds ||
+            remainingSec <= 15 ||
+            isFullyBuffered ||
+            bufferedAhead == kotlin.time.Duration.ZERO
+        )
+
         if (!isWarmupTrigger && !isProgressTrigger) return
 
         val playlist = audioPlayer.playlistFlow.value
@@ -778,6 +807,10 @@ class DeviceAudioPlayerQueue(
             var totalRead = 0
             try {
                 while (totalRead < RamHeadBufferPool.HEAD_BUFFER_SIZE && !channel.isClosedForRead) {
+                    if (audioPlayer.playerStateFlow.value == PlayerState.BUFFERING) {
+                        logger.d { "Aborting lookahead prefetch for track $trackId: active playback started buffering" }
+                        return@execute false
+                    }
                     val read = channel.readAvailable(buffer, totalRead, RamHeadBufferPool.HEAD_BUFFER_SIZE - totalRead)
                     if (read <= 0) break
                     totalRead += read
