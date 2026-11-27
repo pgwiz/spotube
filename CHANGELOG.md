@@ -19,6 +19,8 @@
 - **plugin/PluginManager**: Auto-select vacant ability slots on plugin installation and recover fallback providers on plugin removal (PR #3147).
 
 ### Fixes
+- **server/resilience**: Prevent abrupt playback termination on transient upstream socket timeouts and connection resets by preserving continuation byte channels and resuming from the last acknowledged byte offset.
+- **audioplayer/prefetch**: Prevent active track rebuffering and bandwidth starvation caused by aggressive lookahead prefetching during early track startup on slow or congested networks.
 - **server/StreamProxy**: Prevent duplicate `Content-Length` and `Content-Type` headers in spliced 206 Partial Content responses that cause VLC player socket disconnections; correctly compute bounded continuation ranges (`bytes=0-N` where $N \ge 512\text{KB}$) and discard duplicated byte prefixes if upstream responds with 200 OK.
 - **server/CacheManager**: Make `AsyncSink.write` suspending to prevent silent dropping of audio chunks under slow flash I/O, and verify write integrity before committing cache entries to prevent corrupt audio caching; strip duplicate headers in `serveCacheHead`.
 - **server/StreamingUrlRepository**: Synchronize cache snapshot under `streamUrlCacheMutex` in `persistToDisk` to prevent `ConcurrentModificationException` during asynchronous disk saves.

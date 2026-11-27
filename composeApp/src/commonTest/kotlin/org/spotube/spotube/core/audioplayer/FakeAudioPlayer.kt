@@ -189,6 +189,10 @@ class FakeAudioPlayer : AudioPlayerInterface {
         _durationFlow.value = duration
     }
 
+    fun setBufferingPosition(bufferingPosition: Duration) {
+        _bufferingPositionFlow.value = bufferingPosition
+    }
+
     fun resetCallCounts() {
         loadCallCount = 0
         playCallCount = 0

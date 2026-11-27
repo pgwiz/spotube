@@ -649,4 +649,39 @@ class StreamingUrlRepositoryBehaviorTest {
 
         assertNull(h.repository.getCachedStreamUrlEntry("t1"))
     }
+
+    // ---------- slow network / timeout fallback ----------
+
+    @Test
+    fun `fallbackToLowerQuality selects lower bitrate stream when multiple candidates exist`() = runTest {
+        val h = Harness()
+        val plugin = h.selectPlugin("pluginA")
+        plugin.audioAPI.onGetStreamsByTrack = {
+            listOf(streamedSource("src1", listOf(
+                stream("https://example.com/high.opus", bitrate = 256_000),
+                stream("https://example.com/medium.opus", bitrate = 128_000),
+                stream("https://example.com/low.opus", bitrate = 70_000)
+            )))
+        }
+
+        val normal = h.repository.resolveStreamInfo(track("t1"))
+        assertEquals("https://example.com/high.opus", normal?.url)
+
+        val fallback = h.repository.resolveStreamInfo(track("t1"), forceRefresh = true, fallbackToLowerQuality = true)
+        assertEquals("https://example.com/medium.opus", fallback?.url)
+    }
+
+    @Test
+    fun `fallbackToLowerQuality gracefully returns available candidate if only one stream exists`() = runTest {
+        val h = Harness()
+        val plugin = h.selectPlugin("pluginA")
+        plugin.audioAPI.onGetStreamsByTrack = {
+            listOf(streamedSource("src1", listOf(
+                stream("https://example.com/only.opus", bitrate = 160_000)
+            )))
+        }
+
+        val fallback = h.repository.resolveStreamInfo(track("t1"), forceRefresh = true, fallbackToLowerQuality = true)
+        assertEquals("https://example.com/only.opus", fallback?.url)
+    }
 }
